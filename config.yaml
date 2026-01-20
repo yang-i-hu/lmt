@@ -1,0 +1,31 @@
+# =============================================================================
+# Factor DataLoader Configuration
+# =============================================================================
+
+# Data directory containing parquet files
+data_dir: "data/"
+
+# Factor matrix key: '0', '1', or '2'
+factor_key: "0"
+
+# Date range filter (format: YYYYMMDD)
+# Set to null to include all dates
+start_date: 20180102
+end_date: 20180301
+
+# Instrument universe file (one instrument code per line)
+# Set to null to include all instruments
+universe_file: "universe.txt"
+
+# Alternative: specify instruments directly as a list
+# universe_list:
+#   - "000001"
+#   - "000002"
+#   - "000004"
+
+# If true, load from factors_X_aligned.parquet (includes labels)
+# If false, load from factors_X.parquet (factors only)
+aligned_only: true
+
+# If true, drop rows where labelValue is NaN
+drop_na_labels: true
