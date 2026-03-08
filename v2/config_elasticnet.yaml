@@ -1,0 +1,45 @@
+# =============================================================================
+# ElasticNet Rolling Per-Snapshot Training Configuration (v2)
+# =============================================================================
+# Use with: python train_elasticnet.py --config config_elasticnet.yaml
+#
+# ⚠️ Each snapshot is processed independently — no cross-snapshot merging.
+
+# Data directory (contains per-snapshot folders: 20181228/, 20191231/, etc.)
+data_dir: "data/"
+
+# Snapshots to process (in chronological order)
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+# OOS end dates for each snapshot
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+# Factor keys to train (each key gets an independent model)
+factor_keys: ["0", "1", "2"]
+
+# Model parameters
+model:
+  alpha: 0.01           # Regularization strength
+  l1_ratio: 0.5         # 0=Ridge, 1=Lasso, 0.5=balanced
+  max_iter: 2000        # Maximum iterations
+  tol: 0.0001           # Convergence tolerance
+  fit_intercept: true
+
+# Training parameters
+training:
+  random_seed: 42
+
+# LMT API evaluation
+evaluation:
+  label_period: 10
+  alpha: 1
+
+# Output (per-snapshot results saved under {output_dir}/{snapshot}/)
+output:
+  output_dir: "outputs_elasticnet"

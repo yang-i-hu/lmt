@@ -1,0 +1,37 @@
+# =============================================================================
+# DNN Full Training Configuration
+# =============================================================================
+# Use with: python train_dnn_full.py --config config_dnn_full.yaml
+
+# Data paths (relative to this config file or absolute)
+data_dir: "data/combined"
+
+# Model architecture
+model:
+  hidden_sizes: [512, 256, 128, 64]
+  dropout: 0.3
+  activation: "leaky_relu"  # relu, leaky_relu, elu, gelu, tanh
+  batch_norm: true
+
+# Training parameters
+training:
+  epochs: 100
+  batch_size: 4096
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 15
+  val_ratio: 0.15  # Last 15% of IS data for validation
+  random_seed: 42
+
+# Loss function
+loss:
+  type: "mse"  # mse, mae, huber, ic_loss, combined
+
+# LMT API evaluation
+evaluation:
+  label_period: 10
+  alpha: 1
+
+# Output
+output:
+  output_dir: "outputs_dnn_full"

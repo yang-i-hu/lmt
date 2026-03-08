@@ -1,0 +1,28 @@
+# =============================================================================
+# ElasticNet Full Training Configuration  
+# =============================================================================
+# Use with: python train_elasticnet_full.py --config config_elasticnet_full.yaml
+
+# Data paths (relative to this config file or absolute)
+data_dir: "data/combined"
+
+# Model parameters
+model:
+  alpha: 0.01           # Regularization strength
+  l1_ratio: 0.5         # 0=Ridge, 1=Lasso, 0.5=balanced
+  max_iter: 2000        # Maximum iterations
+  tol: 0.0001           # Convergence tolerance
+  fit_intercept: true
+
+# Training parameters
+training:
+  random_seed: 42
+
+# LMT API evaluation
+evaluation:
+  label_period: 10
+  alpha: 1
+
+# Output
+output:
+  output_dir: "outputs_elasticnet_full"

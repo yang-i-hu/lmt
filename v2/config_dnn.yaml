@@ -1,0 +1,51 @@
+# =============================================================================
+# DNN Rolling Per-Snapshot Training Configuration (v2)
+# =============================================================================
+# Use with: python train_dnn.py --config config_dnn.yaml
+#
+# ⚠️ Each snapshot is processed independently — no cross-snapshot merging.
+
+# Data directory (contains per-snapshot folders: 20181228/, 20191231/, etc.)
+data_dir: "data/"
+
+# Snapshots to process (in chronological order)
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+# OOS end dates for each snapshot
+# Each snapshot's OOS evaluation period: (cutoff, oos_end]
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+# Factor keys to train (each key gets an independent model)
+factor_keys: ["0", "1", "2"]
+
+# Model architecture
+model:
+  hidden_sizes: [512, 256, 128, 64]
+  dropout: 0.3
+  activation: "leaky_relu"  # relu, leaky_relu, elu, gelu, tanh
+  batch_norm: true
+
+# Training parameters
+training:
+  epochs: 100
+  batch_size: 4096
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 15
+  val_ratio: 0.15  # Last 15% of IS dates for validation (temporal split)
+  random_seed: 42
+
+# LMT API evaluation
+evaluation:
+  label_period: 10
+  alpha: 1
+
+# Output (per-snapshot results saved under {output_dir}/{snapshot}/)
+output:
+  output_dir: "outputs_dnn"
