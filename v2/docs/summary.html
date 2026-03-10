@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>&#x56e0;&#x5b50;&#x52a0;&#x6743;&#x5de5;&#x4f5c;&#x603b;&#x7ed3;</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex/dist/katex.min.css">
+<link href="https://cdn.jsdelivr.net/npm/katex-copytex@latest/dist/katex-copytex.min.css" rel="stylesheet" type="text/css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="因子加权工作总结">因子加权工作总结</h1>
+<blockquote>
+<p><strong>项目目标：</strong> 对 1128 个因子进行机器学习加权组合， 预测未来 10 日收益率</p>
+</blockquote>
+<blockquote>
+<p><strong>评估区间：</strong> 2019–2021（每年独立 OOS 评估 + 全区间汇总）</p>
+</blockquote>
+<p><strong>基线标准（树模型）：</strong>
+<img src="file:///d:\projects\lmt\v2\docs\baseline.png" alt="baseline"></p>
+<hr>
+<h2 id="目录">目录</h2>
+<ul>
+<li><a href="#%E5%9B%A0%E5%AD%90%E5%8A%A0%E6%9D%83%E5%B7%A5%E4%BD%9C%E6%80%BB%E7%BB%93">因子加权工作总结</a>
+<ul>
+<li><a href="#%E7%9B%AE%E5%BD%95">目录</a></li>
+<li><a href="#1-%E6%95%B0%E6%8D%AE%E5%A4%84%E7%90%86%E6%B5%81%E7%A8%8B">1. 数据处理流程</a>
+<ul>
+<li><a href="#11-%E6%95%B0%E6%8D%AE%E6%9D%A5%E6%BA%90">1.1 数据来源</a></li>
+<li><a href="#12-%E5%BF%AB%E7%85%A7%E4%B8%8E-isoos-%E5%88%92%E5%88%86">1.2 快照与 IS/OOS 划分</a></li>
+<li><a href="#13-%E6%95%B0%E6%8D%AE%E9%A2%84%E5%A4%84%E7%90%86%E6%AD%A5%E9%AA%A4">1.3 数据预处理步骤</a></li>
+</ul>
+</li>
+<li><a href="#2-%E6%A8%A1%E5%9E%8B%E6%80%BB%E8%A7%88">2. 模型总览</a>
+<ul>
+<li><a href="#%E5%85%B7%E4%BD%93%E7%BB%93%E6%9E%9C">具体结果</a>
+<ul>
+<li><a href="#%E7%BB%BC%E5%90%88%E6%8C%87%E6%A0%87">综合指标</a></li>
+<li><a href="#%E9%80%90%E5%B9%B4-ic-%E5%AF%B9%E6%AF%94">逐年 IC 对比</a></li>
+<li><a href="#%E9%80%90%E5%B9%B4%E5%A4%9A%E7%A9%BA%E6%94%B6%E7%9B%8A%E5%AF%B9%E6%AF%94">逐年多空收益对比</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a href="#3-%E6%A8%A1%E5%9E%8B%E6%9E%B6%E6%9E%84%E8%AF%A6%E7%BB%86%E8%AF%B4%E6%98%8E">3. 模型架构详细说明</a>
+<ul>
+<li><a href="#31-elasticnet">3.1 ElasticNet</a></li>
+<li><a href="#32-mlp">3.2 MLP</a></li>
+<li><a href="#33-residual-mlp%E6%AE%8B%E5%B7%AE%E7%BD%91%E7%BB%9C">3.3 Residual MLP（残差网络）</a></li>
+<li><a href="#34-autoencoder">3.4 Autoencoder</a></li>
+<li><a href="#35-cross-sectional-transformer-%E8%B7%A8%E8%82%A1%E7%A5%A8%E6%B3%A8%E6%84%8F%E5%8A%9B%E6%9C%BA%E5%88%B6">3.5 Cross-Sectional Transformer （跨股票注意力机制）</a></li>
+<li><a href="#36-temporal-transformer%E6%97%B6%E5%BA%8F">3.6 Temporal Transformer（时序）</a></li>
+</ul>
+</li>
+<li><a href="#4-%E8%AE%AD%E7%BB%83%E8%AE%BE%E7%BD%AE">4. 训练设置</a>
+<ul>
+<li><a href="#41-%E4%BC%98%E5%8C%96%E5%99%A8%E4%B8%8E%E5%AD%A6%E4%B9%A0%E7%8E%87%E8%B0%83%E5%BA%A6">4.1 优化器与学习率调度</a></li>
+<li><a href="#42-%E6%AD%A3%E5%88%99%E5%8C%96%E6%89%8B%E6%AE%B5">4.2 正则化手段</a></li>
+</ul>
+</li>
+<li><a href="#5-%E9%80%90%E5%B9%B4%E5%88%86%E6%9E%90">5. 逐年分析</a>
+<ul>
+<li><a href="#51-%E9%80%90%E5%B9%B4-ic">5.1 逐年 IC</a></li>
+<li><a href="#52-%E9%80%90%E5%B9%B4%E5%A4%9A%E7%A9%BA%E6%94%B6%E7%9B%8Als-return-">5.2 逐年多空收益（LS Return, %）</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="1-数据处理流程">1. 数据处理流程</h2>
+<h3 id="11-数据来源">1.1 数据来源</h3>
+<table>
+<thead>
+<tr>
+<th>数据</th>
+<th>文件格式</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>因子暴露</strong></td>
+<td><code>weakFactors.h5</code>（HDF5）</td>
+<td>每个快照下，按 key <code>/0</code>、<code>/1</code>、<code>/2</code> 存储 3 组因子（共 1128 个因子）</td>
+</tr>
+<tr>
+<td><strong>标签</strong></td>
+<td><code>Label10.h5</code>（HDF5, PyTables TABLE）</td>
+<td>字段 <code>labelValue</code> 为未来 10 日前瞻收益率</td>
+</tr>
+</tbody>
+</table>
+<h3 id="12-快照与-isoos-划分">1.2 快照与 IS/OOS 划分</h3>
+<p>各快照独立训练、独立评估，不跨快照合并数据。</p>
+<table>
+<thead>
+<tr>
+<th>快照名称</th>
+<th>训练集截止</th>
+<th>OOS 评估区间</th>
+<th>OOS 年份</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>20181228</code></td>
+<td>2018-12-28</td>
+<td>2019-01-01 ~ 2019-12-31</td>
+<td>2019</td>
+</tr>
+<tr>
+<td><code>20191231</code></td>
+<td>2019-12-31</td>
+<td>2020-01-01 ~ 2020-12-31</td>
+<td>2020</td>
+</tr>
+<tr>
+<td><code>20201231</code></td>
+<td>2020-12-31</td>
+<td>2021-01-01 ~ 2021-12-31</td>
+<td>2021</td>
+</tr>
+</tbody>
+</table>
+<h3 id="13-数据预处理步骤">1.3 数据预处理步骤</h3>
+<pre><code>原始 HDF5 文件
+   │
+   ├─ 读取 weakFactors.h5 (key /0, /1, /2)
+   │   → DataFrame (日期×股票, 1128列因子)
+   │
+   ├─ 读取 Label10.h5
+   │   → DataFrame (日期×股票, labelValue)
+   │
+   ├─ 日期+股票代码对齐 (inner join)
+   │
+   ├─ 去除含 NaN 的行
+   │
+   ├─ IS/OOS 分割 (按日期 ≤ cutoff / &gt; cutoff)
+   │
+   ├─ IS 内部时序验证集分割 (后 15% 日期作为 val)
+   │
+   ├─ StandardScaler 标准化 (仅在 IS 训练集上 fit, transform 所有集合)
+   │
+   └─ 输出: X_train, y_train, X_val, y_val, X_oos, y_oos + 日期/股票索引
+</code></pre>
+<hr>
+<h2 id="2-模型总览">2. 模型总览</h2>
+<p>共实现 <strong>6 个模型</strong>（1 个线性基线 + 5 个深度学习模型），按 IC 降序排列：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center">排名</th>
+<th>模型</th>
+<th>类型</th>
+<th style="text-align:center">IC</th>
+<th style="text-align:center">ICIR</th>
+<th style="text-align:center">多空收益(%)</th>
+<th style="text-align:center">多空 IR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">🥇</td>
+<td><strong>AutoEncoder</strong></td>
+<td>编码器-预测器</td>
+<td style="text-align:center">0.1542</td>
+<td style="text-align:center">1.895</td>
+<td style="text-align:center">1.476</td>
+<td style="text-align:center">14.502</td>
+</tr>
+<tr>
+<td style="text-align:center">🥈</td>
+<td><strong>ElasticNet</strong></td>
+<td>线性回归</td>
+<td style="text-align:center">0.1539</td>
+<td style="text-align:center">1.830</td>
+<td style="text-align:center">1.548</td>
+<td style="text-align:center">14.135</td>
+</tr>
+<tr>
+<td style="text-align:center">🥉</td>
+<td><strong>Cross-Sectional</strong></td>
+<td>截面 Transformer</td>
+<td style="text-align:center">0.1527</td>
+<td style="text-align:center">1.851</td>
+<td style="text-align:center">1.499</td>
+<td style="text-align:center">14.376</td>
+</tr>
+<tr>
+<td style="text-align:center">4</td>
+<td><strong>DNN (MLP)</strong></td>
+<td>前馈神经网络</td>
+<td style="text-align:center">0.1520</td>
+<td style="text-align:center">1.847</td>
+<td style="text-align:center">1.444</td>
+<td style="text-align:center">14.335</td>
+</tr>
+<tr>
+<td style="text-align:center">5</td>
+<td><strong>ResidualMLP</strong></td>
+<td>残差网络</td>
+<td style="text-align:center">0.1481</td>
+<td style="text-align:center">1.891</td>
+<td style="text-align:center">1.385</td>
+<td style="text-align:center">12.978</td>
+</tr>
+<tr>
+<td style="text-align:center">6</td>
+<td><strong>Temporal</strong></td>
+<td>时序 Transformer</td>
+<td style="text-align:center">0.1345</td>
+<td style="text-align:center">1.719</td>
+<td style="text-align:center">1.180</td>
+<td style="text-align:center">11.510</td>
+</tr>
+<tr>
+<td style="text-align:center">—</td>
+<td><strong>基线</strong></td>
+<td>树模型</td>
+<td style="text-align:center">0.1206</td>
+<td style="text-align:center">1.455</td>
+<td style="text-align:center">1.176</td>
+<td style="text-align:center">9.638</td>
+</tr>
+</tbody>
+</table>
+<h3 id="具体结果">具体结果</h3>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th style="text-align:center">IC</th>
+<th style="text-align:center">ICIR</th>
+<th style="text-align:center">Short(%)</th>
+<th style="text-align:center">Long(%)</th>
+<th style="text-align:center">LS(%)</th>
+<th style="text-align:center">IR_LS</th>
+<th style="text-align:center">HS_Short</th>
+<th style="text-align:center">HS_Long</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>AutoEncoder</strong></td>
+<td style="text-align:center"><strong>0.1542</strong></td>
+<td style="text-align:center"><strong>1.895</strong></td>
+<td style="text-align:center">-0.457</td>
+<td style="text-align:center">0.376</td>
+<td style="text-align:center">1.476</td>
+<td style="text-align:center"><strong>14.502</strong></td>
+<td style="text-align:center">0.061</td>
+<td style="text-align:center">0.058</td>
+</tr>
+<tr>
+<td><strong>ElasticNet</strong></td>
+<td style="text-align:center">0.1539</td>
+<td style="text-align:center">1.830</td>
+<td style="text-align:center">-0.470</td>
+<td style="text-align:center">0.385</td>
+<td style="text-align:center"><strong>1.548</strong></td>
+<td style="text-align:center">14.135</td>
+<td style="text-align:center">0.060</td>
+<td style="text-align:center">0.057</td>
+</tr>
+<tr>
+<td><strong>CrossSectional</strong></td>
+<td style="text-align:center">0.1527</td>
+<td style="text-align:center">1.851</td>
+<td style="text-align:center">-0.457</td>
+<td style="text-align:center">0.389</td>
+<td style="text-align:center">1.499</td>
+<td style="text-align:center">14.376</td>
+<td style="text-align:center">0.061</td>
+<td style="text-align:center">0.060</td>
+</tr>
+<tr>
+<td><strong>DNN</strong></td>
+<td style="text-align:center">0.1520</td>
+<td style="text-align:center">1.847</td>
+<td style="text-align:center">-0.446</td>
+<td style="text-align:center">0.385</td>
+<td style="text-align:center">1.444</td>
+<td style="text-align:center">14.335</td>
+<td style="text-align:center">0.062</td>
+<td style="text-align:center">0.058</td>
+</tr>
+<tr>
+<td><strong>ResidualMLP</strong></td>
+<td style="text-align:center">0.1481</td>
+<td style="text-align:center">1.891</td>
+<td style="text-align:center">-0.449</td>
+<td style="text-align:center">0.343</td>
+<td style="text-align:center">1.385</td>
+<td style="text-align:center">12.978</td>
+<td style="text-align:center">0.061</td>
+<td style="text-align:center">0.063</td>
+</tr>
+<tr>
+<td><strong>Temporal</strong></td>
+<td style="text-align:center">0.1345</td>
+<td style="text-align:center">1.719</td>
+<td style="text-align:center">-0.393</td>
+<td style="text-align:center">0.345</td>
+<td style="text-align:center">1.180</td>
+<td style="text-align:center">11.510</td>
+<td style="text-align:center">0.055</td>
+<td style="text-align:center">0.054</td>
+</tr>
+<tr>
+<td><strong>基线</strong></td>
+<td style="text-align:center">0.1206</td>
+<td style="text-align:center">1.455</td>
+<td style="text-align:center">-0.402</td>
+<td style="text-align:center">0.323</td>
+<td style="text-align:center">1.176</td>
+<td style="text-align:center">9.638</td>
+<td style="text-align:center">0.060</td>
+<td style="text-align:center">0.058</td>
+</tr>
+</tbody>
+</table>
+<h4 id="综合指标">综合指标</h4>
+<p><img src="file:///d:\projects\lmt\v2\docs\model_comparison_aggregate.png" alt="综合指标对比"></p>
+<p>四个维度的横向柱状图：IC、ICIR、多空收益、多空 IR，按 IC 排序。</p>
+<h4 id="逐年-ic-对比">逐年 IC 对比</h4>
+<p><img src="file:///d:\projects\lmt\v2\docs\model_ic_per_year.png" alt="逐年 IC"></p>
+<p>分组柱状图展示每个模型在 2019/2020/2021 三年的 IC 变化。</p>
+<h4 id="逐年多空收益对比">逐年多空收益对比</h4>
+<p><img src="file:///d:\projects\lmt\v2\docs\model_ls_per_year.png" alt="逐年多空收益"></p>
+<p>分组柱状图展示每个模型在 2019/2020/2021 三年的多空收益变化。</p>
+<hr>
+<h2 id="3-模型架构详细说明">3. 模型架构详细说明</h2>
+<h3 id="31-elasticnet">3.1 ElasticNet</h3>
+<p><strong>类型：</strong> 线性模型（scikit-learn）</p>
+<p><strong>结构：</strong></p>
+<pre><code>输入 (1128 因子) → 线性组合 → 标量预测
+</code></pre>
+<p><strong>损失函数：</strong></p>
+<p class="katex-block"><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi mathvariant="script">L</mi><mo>=</mo><mfrac><mn>1</mn><mrow><mn>2</mn><mi>N</mi></mrow></mfrac><mi mathvariant="normal">∥</mi><mi>y</mi><mo>−</mo><mi>X</mi><mi>β</mi><msubsup><mi mathvariant="normal">∥</mi><mn>2</mn><mn>2</mn></msubsup><mo>+</mo><mi>α</mi><mrow><mo fence="true">(</mo><mfrac><mrow><mn>1</mn><mo>−</mo><mi>ρ</mi></mrow><mn>2</mn></mfrac><mi mathvariant="normal">∥</mi><mi>β</mi><msubsup><mi mathvariant="normal">∥</mi><mn>2</mn><mn>2</mn></msubsup><mo>+</mo><mi>ρ</mi><mi mathvariant="normal">∥</mi><mi>β</mi><msub><mi mathvariant="normal">∥</mi><mn>1</mn></msub><mo fence="true">)</mo></mrow></mrow><annotation encoding="application/x-tex">\mathcal{L} = \frac{1}{2N}\|y - X\beta\|_2^2 + \alpha\left(\frac{1-\rho}{2}\|\beta\|_2^2 + \rho\|\beta\|_1\right)
+</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathcal">L</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:2.0074em;vertical-align:-0.686em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.3214em;"><span style="top:-2.314em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord">2</span><span class="mord mathnormal" style="margin-right:0.10903em;">N</span></span></span><span style="top:-3.23em;"><span class="pstrut" style="height:3em;"></span><span class="frac-line" style="border-bottom-width:0.04em;"></span></span><span style="top:-3.677em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.686em;"><span></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mord">∥</span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:1.1141em;vertical-align:-0.25em;"></span><span class="mord mathnormal" style="margin-right:0.05278em;">Xβ</span><span class="mord"><span class="mord">∥</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.8641em;"><span style="top:-2.453em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span><span style="top:-3.113em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.247em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:2.4em;vertical-align:-0.95em;"></span><span class="mord mathnormal" style="margin-right:0.0037em;">α</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="minner"><span class="mopen delimcenter" style="top:0em;"><span class="delimsizing size3">(</span></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.3214em;"><span style="top:-2.314em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord">2</span></span></span><span style="top:-3.23em;"><span class="pstrut" style="height:3em;"></span><span class="frac-line" style="border-bottom-width:0.04em;"></span></span><span style="top:-3.677em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord">1</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mord mathnormal">ρ</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.686em;"><span></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mord">∥</span><span class="mord mathnormal" style="margin-right:0.05278em;">β</span><span class="mord"><span class="mord">∥</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.8641em;"><span style="top:-2.453em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span><span style="top:-3.113em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.247em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mord mathnormal">ρ</span><span class="mord">∥</span><span class="mord mathnormal" style="margin-right:0.05278em;">β</span><span class="mord"><span class="mord">∥</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3011em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mclose delimcenter" style="top:0em;"><span class="delimsizing size3">)</span></span></span></span></span></span></span></p>
+<ul>
+<li><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>α</mi><mo>=</mo><mn>0.01</mn></mrow><annotation encoding="application/x-tex">\alpha = 0.01</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.4306em;"></span><span class="mord mathnormal" style="margin-right:0.0037em;">α</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">0.01</span></span></span></span>（正则化强度），<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ρ</mi><mo>=</mo><mn>0.5</mn></mrow><annotation encoding="application/x-tex">\rho = 0.5</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.625em;vertical-align:-0.1944em;"></span><span class="mord mathnormal">ρ</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">0.5</span></span></span></span>（L1/L2 平衡）</li>
+<li>L1 正则化带来稀疏性（~85%系数最终为 0），L2 正则化防止过拟合</li>
+</ul>
+<hr>
+<h3 id="32-mlp">3.2 MLP</h3>
+<p><strong>类型：</strong> 多层感知机</p>
+<p><strong>结构：</strong></p>
+<pre><code>输入 (F) → [Linear → BatchNorm → LeakyReLU → Dropout] × 4 → Linear(1)
+隐藏层维度: 512 → 256 → 128 → 64 → 1
+</code></pre>
+<p><strong>损失函数：</strong></p>
+<p class="katex-block"><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi mathvariant="script">L</mi><mo>=</mo><mtext>MSE</mtext><mo stretchy="false">(</mo><mover accent="true"><mi>y</mi><mo>^</mo></mover><mo separator="true">,</mo><mi>y</mi><mo stretchy="false">)</mo><mo>=</mo><mfrac><mn>1</mn><mi>N</mi></mfrac><munderover><mo>∑</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>N</mi></munderover><mo stretchy="false">(</mo><msub><mover accent="true"><mi>y</mi><mo>^</mo></mover><mi>i</mi></msub><mo>−</mo><msub><mi>y</mi><mi>i</mi></msub><msup><mo stretchy="false">)</mo><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">\mathcal{L} = \text{MSE}(\hat{y}, y) = \frac{1}{N}\sum_{i=1}^{N}(\hat{y}_i - y_i)^2
+</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathcal">L</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord text"><span class="mord">MSE</span></span><span class="mopen">(</span><span class="mord accent"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.6944em;"><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span></span><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="accent-body" style="left:-0.1944em;"><span class="mord">^</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.1944em;"><span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:3.106em;vertical-align:-1.2777em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.3214em;"><span style="top:-2.314em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.10903em;">N</span></span></span><span style="top:-3.23em;"><span class="pstrut" style="height:3em;"></span><span class="frac-line" style="border-bottom-width:0.04em;"></span></span><span style="top:-3.677em;"><span class="pstrut" style="height:3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.686em;"><span></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:1.8283em;"><span style="top:-1.8723em;margin-left:0em;"><span class="pstrut" style="height:3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">i</span><span class="mrel mtight">=</span><span class="mord mtight">1</span></span></span></span><span style="top:-3.05em;"><span class="pstrut" style="height:3.05em;"></span><span><span class="mop op-symbol large-op">∑</span></span></span><span style="top:-4.3em;margin-left:0em;"><span class="pstrut" style="height:3.05em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right:0.10903em;">N</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:1.2777em;"><span></span></span></span></span></span><span class="mopen">(</span><span class="mord"><span class="mord accent"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.6944em;"><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span></span><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="accent-body" style="left:-0.1944em;"><span class="mord">^</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.1944em;"><span></span></span></span></span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:1.1141em;vertical-align:-0.25em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right:0.03588em;">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.3117em;"><span style="top:-2.55em;margin-left:-0.0359em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mclose"><span class="mclose">)</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height:0.8641em;"><span style="top:-3.113em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span></span></span></span></span></p>
+<p><strong>优势：</strong> 能够学习因子间非线性组合关系。Kaiming 初始化 + BatchNorm 保证训练稳定性。</p>
+<hr>
+<h3 id="33-residual-mlp残差网络">3.3 Residual MLP（残差网络）</h3>
+<p><strong>类型：</strong> ResNet 风格的深度前馈网络</p>
+<p><strong>结构：</strong></p>
+<pre><code>输入 (F) → Linear → BN → GELU → [ResidualBlock × 4] → Linear(1)
+
+ResidualBlock:
+    x → Linear → BN → GELU → Dropout → Linear → BN → (+x) → GELU
+</code></pre>
+<p><strong>优势：</strong> 跳跃连接允许训练更深的网络，梯度流动更顺畅。</p>
+<hr>
+<h3 id="34-autoencoder">3.4 Autoencoder</h3>
+<p><strong>类型：</strong> 编码器 → 瓶颈层 → 预测器（附加重构损失）</p>
+<p><strong>结构：</strong></p>
+<pre><code>输入 (F 因子) → Encoder [512 → 256] → 瓶颈层 (64 维)
+                                         ├→ Predictor [128] → 标量预测
+                                         └→ Decoder [256 → 512] → 重构输入 (F)
+</code></pre>
+<p><strong>损失函数：</strong></p>
+<p class="katex-block"><span class="katex-display"><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><semantics><mrow><mi mathvariant="script">L</mi><mo>=</mo><mtext>MSE</mtext><mo stretchy="false">(</mo><mover accent="true"><mi>y</mi><mo>^</mo></mover><mo separator="true">,</mo><mi>y</mi><mo stretchy="false">)</mo><mo>+</mo><msub><mi>λ</mi><mtext>recon</mtext></msub><mo>⋅</mo><mtext>MSE</mtext><mo stretchy="false">(</mo><mi>x</mi><mo separator="true">,</mo><mover accent="true"><mi>x</mi><mo>^</mo></mover><mo stretchy="false">)</mo></mrow><annotation encoding="application/x-tex">\mathcal{L} = \text{MSE}(\hat{y}, y) + \lambda_{\text{recon}} \cdot \text{MSE}(x, \hat{x})
+</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.6833em;"></span><span class="mord mathcal">L</span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord text"><span class="mord">MSE</span></span><span class="mopen">(</span><span class="mord accent"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.6944em;"><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span></span><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="accent-body" style="left:-0.1944em;"><span class="mord">^</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.1944em;"><span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord mathnormal" style="margin-right:0.03588em;">y</span><span class="mclose">)</span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:0.8444em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal">λ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">recon</span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2222em;"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right:0.2222em;"></span></span><span class="base"><span class="strut" style="height:1em;vertical-align:-0.25em;"></span><span class="mord text"><span class="mord">MSE</span></span><span class="mopen">(</span><span class="mord mathnormal">x</span><span class="mpunct">,</span><span class="mspace" style="margin-right:0.1667em;"></span><span class="mord accent"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height:0.6944em;"><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="mord mathnormal">x</span></span><span style="top:-3em;"><span class="pstrut" style="height:3em;"></span><span class="accent-body" style="left:-0.2222em;"><span class="mord">^</span></span></span></span></span></span></span><span class="mclose">)</span></span></span></span></span></p>
+<ul>
+<li><span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>λ</mi><mtext>recon</mtext></msub><mo>=</mo><mn>0.1</mn></mrow><annotation encoding="application/x-tex">\lambda_{\text{recon}} = 0.1</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base"><span class="strut" style="height:0.8444em;vertical-align:-0.15em;"></span><span class="mord"><span class="mord mathnormal">λ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height:0.1514em;"><span style="top:-2.55em;margin-left:0em;margin-right:0.05em;"><span class="pstrut" style="height:2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord text mtight"><span class="mord mtight">recon</span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height:0.15em;"><span></span></span></span></span></span></span><span class="mspace" style="margin-right:0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right:0.2778em;"></span></span><span class="base"><span class="strut" style="height:0.6444em;"></span><span class="mord">0.1</span></span></span></span>：重构损失权重</li>
+</ul>
+<p><strong>优势：</strong> 将 1128 个高度相关的因子压缩到 64 维潜在空间，降维同时保留有效信号；重构损失作为正则化手段，防止潜在空间只拟合预测相关的信息。<br>
+<strong>结果分析：</strong> 在因子空间高度冗余（1128 个因子大量共线性）的场景下，降维 + 预测的双任务学习能有效过滤噪声、提取核心因子结构。</p>
+<hr>
+<h3 id="35-cross-sectional-transformer-跨股票注意力机制">3.5 Cross-Sectional Transformer （跨股票注意力机制）</h3>
+<p><strong>结构：</strong></p>
+<pre><code>每个日期:
+    [股票₁ 因子, 股票₂ 因子, …, 股票ₛ 因子]   (S, F)
+        → stock_proj (F → d_model)
+        → TransformerEncoder (跨股票注意力)
+        → 每只股票 MLP head
+        → 每只股票预测值                         (S,)
+</code></pre>
+<p><strong>优势：</strong> 每只股票能看到同日期所有其他股票，学习截面结构（如行业、拥挤度）。<br>
+<strong>结果分析：</strong> 截面注意力机制能捕捉股票间相对关系，这是纯逐样本（sample-wise）模型无法做到的。尤其在 2021 年表现最好（LS=1.636），说明市场结构信息在当年更加重要。</p>
+<hr>
+<h3 id="36-temporal-transformer时序">3.6 Temporal Transformer（时序）</h3>
+<p><strong>类型：</strong> 因子历史序列的因果注意力</p>
+<p><strong>结构：</strong></p>
+<pre><code>每只股票:
+    [因子_{t-20}, 因子_{t-19}, …, 因子_t]   (W=20, F)
+        → input_proj (F → d_model) + 正弦位置编码
+        → Causal TransformerEncoder (带掩码: 不看未来)
+        → 最后时间步表示
+        → MLP head → 标量预测
+</code></pre>
+<p><strong>优势：</strong> 能学习动量衰减、波动率聚集、市场状态切换等时序模式。<br>
+<strong>结果分析：</strong> IC <strong>最低</strong>（0.1345），多空收益也最低（1.180%）。可能原因：</p>
+<ol>
+<li>20 天窗口的因子值时序变化可能不足以产生强信号</li>
+<li>因子本身是每日截面暴露值，时序上的自相关性可能较弱</li>
+<li>模型参数量大，在有限样本下容易过拟合</li>
+</ol>
+<hr>
+<h2 id="4-训练设置">4. 训练设置</h2>
+<h3 id="41-优化器与学习率调度">4.1 优化器与学习率调度</h3>
+<p>所有深度学习模型使用 <strong>AdamW</strong> 优化器 + <strong>SequentialLR</strong> 学习率调度</p>
+<h3 id="42-正则化手段">4.2 正则化手段</h3>
+<p>金融收益预测的<strong>信噪比极低</strong>，激进的学习率会导致模型在前几轮就过拟合噪声。因此：</p>
+<ul>
+<li><strong>低学习率 + 预热</strong> → 防止跳过微弱信号</li>
+<li><strong>强权重衰减</strong> → 惩罚拟合噪声的大权重</li>
+<li><strong>小批量</strong> → 每轮更多梯度更新，收敛更平滑</li>
+<li><strong>早停</strong> → 泛化能力不再提升时立即停止</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>AdamW 权重衰减</strong></td>
+<td>解耦 L2 正则化</td>
+</tr>
+<tr>
+<td><strong>Dropout (0.3)</strong></td>
+<td>防止神经元共适应</td>
+</tr>
+<tr>
+<td><strong>梯度裁剪 (max_norm=1.0)</strong></td>
+<td>防止梯度爆炸</td>
+</tr>
+<tr>
+<td><strong>早停 + 最佳权重恢复</strong></td>
+<td>停止时恢复验证损失最低的权重</td>
+</tr>
+<tr>
+<td><strong>BatchNorm / LayerNorm</strong></td>
+<td>稳定训练，轻度正则化效果</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="5-逐年分析">5. 逐年分析</h2>
+<h3 id="51-逐年-ic">5.1 逐年 IC</h3>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th style="text-align:center">2019</th>
+<th style="text-align:center">2020</th>
+<th style="text-align:center">2021</th>
+<th style="text-align:center">趋势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ElasticNet</td>
+<td style="text-align:center"><strong>0.1695</strong></td>
+<td style="text-align:center"><strong>0.1596</strong></td>
+<td style="text-align:center">0.1325</td>
+<td style="text-align:center">↘</td>
+</tr>
+<tr>
+<td>AutoEncoder</td>
+<td style="text-align:center">0.1675</td>
+<td style="text-align:center">0.1549</td>
+<td style="text-align:center"><strong>0.1403</strong></td>
+<td style="text-align:center">↘</td>
+</tr>
+<tr>
+<td>CrossSectional</td>
+<td style="text-align:center">0.1662</td>
+<td style="text-align:center">0.1568</td>
+<td style="text-align:center">0.1352</td>
+<td style="text-align:center">↘</td>
+</tr>
+<tr>
+<td>DNN</td>
+<td style="text-align:center">0.1628</td>
+<td style="text-align:center">0.1573</td>
+<td style="text-align:center">0.1357</td>
+<td style="text-align:center">↘</td>
+</tr>
+<tr>
+<td>ResidualMLP</td>
+<td style="text-align:center">0.1553</td>
+<td style="text-align:center">0.1540</td>
+<td style="text-align:center">0.1352</td>
+<td style="text-align:center">↘</td>
+</tr>
+<tr>
+<td>Temporal</td>
+<td style="text-align:center">0.1402</td>
+<td style="text-align:center">0.1380</td>
+<td style="text-align:center">0.1253</td>
+<td style="text-align:center">↘</td>
+</tr>
+</tbody>
+</table>
+<p><strong>观察：</strong></p>
+<ul>
+<li>所有模型的 IC 在 2019 → 2021 均呈下降趋势，符合 A 股市场 alpha 衰减的一般规律</li>
+<li><strong>AutoEncoder 在 2021 年 IC 降幅最小</strong>（0.1675 → 0.1403，降幅 16%），展现了最强的抗衰减能力</li>
+<li>ElasticNet 在 2019 年 IC 最高，但在 2021 年衰减明显（降幅 22%）</li>
+</ul>
+<h3 id="52-逐年多空收益ls-return-">5.2 逐年多空收益（LS Return, %）</h3>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th style="text-align:center">2019</th>
+<th style="text-align:center">2020</th>
+<th style="text-align:center">2021</th>
+<th style="text-align:center">趋势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ElasticNet</td>
+<td style="text-align:center">1.376</td>
+<td style="text-align:center"><strong>1.671</strong></td>
+<td style="text-align:center">1.609</td>
+<td style="text-align:center">→</td>
+</tr>
+<tr>
+<td>AutoEncoder</td>
+<td style="text-align:center">1.346</td>
+<td style="text-align:center">1.462</td>
+<td style="text-align:center">1.625</td>
+<td style="text-align:center">↗</td>
+</tr>
+<tr>
+<td>CrossSectional</td>
+<td style="text-align:center">1.290</td>
+<td style="text-align:center">1.588</td>
+<td style="text-align:center"><strong>1.636</strong></td>
+<td style="text-align:center">↗</td>
+</tr>
+<tr>
+<td>DNN</td>
+<td style="text-align:center">1.246</td>
+<td style="text-align:center">1.475</td>
+<td style="text-align:center">1.626</td>
+<td style="text-align:center">↗</td>
+</tr>
+<tr>
+<td>ResidualMLP</td>
+<td style="text-align:center">1.150</td>
+<td style="text-align:center">1.435</td>
+<td style="text-align:center">1.593</td>
+<td style="text-align:center">↗</td>
+</tr>
+<tr>
+<td>Temporal</td>
+<td style="text-align:center">0.939</td>
+<td style="text-align:center">1.222</td>
+<td style="text-align:center">1.405</td>
+<td style="text-align:center">↗</td>
+</tr>
+</tbody>
+</table>
+<p><strong>观察：</strong></p>
+<ul>
+<li>多空收益呈上升趋势（与 IC 下降趋势相反），说明<strong>因子收益分化在扩大</strong></li>
+</ul>
+<hr>
+
+            <script async src="https://cdn.jsdelivr.net/npm/katex-copytex@latest/dist/katex-copytex.min.js"></script>
+            
+        </body>
+        </html>
