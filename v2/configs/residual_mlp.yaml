@@ -1,0 +1,47 @@
+# =============================================================================
+# Residual MLP — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_residual_mlp.py --config configs/residual_mlp.yaml
+#
+# ResNet-style deep factor network.  Residual skip connections stabilise
+# training for deeper architectures and improve gradient flow.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""   # e.g. "../universe.txt"
+
+factor_keys: ["0", "1", "2"]
+
+# Model architecture
+model:
+  hidden_dim: 256       # Width of each residual block
+  n_blocks: 4           # Number of residual blocks (effective depth ≈ 2×n_blocks + 2)
+  dropout: 0.3
+
+# Training
+training:
+  epochs: 100
+  batch_size: 512
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  warmup_epochs: 5
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_residual_mlp"

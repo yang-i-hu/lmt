@@ -1,0 +1,52 @@
+# =============================================================================
+# Factor Transformer — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_factor_transformer.py --config configs/factor_transformer.yaml
+#
+# Treats each factor as a token and applies self-attention to explicitly
+# learn factor interactions.
+#
+# ⚠ Memory: N_factors tokens means O(N²) attention.  Keep d_model small
+#   or use pool="mean" if you have 1000+ factors and limited GPU memory.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  d_model: 64               # Embedding dimension per factor token
+  n_heads: 4                # Attention heads (must divide d_model)
+  n_layers: 2               # Transformer encoder layers
+  dim_feedforward: 128       # FFN hidden dim inside transformer (keep small — N² attention)
+  dropout: 0.3
+  pool: "cls"                # "cls" (CLS token) or "mean" (average pool)
+  gradient_checkpointing: true   # Saves GPU memory by recomputing activations in backward
+
+training:
+  epochs: 100
+  batch_size: 128            # Must be small: each sample has N_factors tokens → O(N²) attention
+  learning_rate: 0.00005     # Very low — transformer + noisy labels
+  weight_decay: 0.01
+  warmup_epochs: 10          # Longer warmup for transformer
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_factor_transformer"

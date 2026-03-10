@@ -1,0 +1,48 @@
+# =============================================================================
+# Factor Autoencoder — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_autoencoder.py --config configs/autoencoder.yaml
+#
+# Learns a compressed latent representation of the high-dimensional factor
+# space before predicting.  recon_weight > 0 adds a reconstruction
+# regulariser to shape the latent space.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  encoder_sizes: [512, 256]     # Hidden layers in encoder
+  latent_dim: 64                # Bottleneck dimension
+  predictor_sizes: [128]        # Hidden layers in prediction head
+  dropout: 0.3
+  recon_weight: 0.1             # Reconstruction loss weight (0 = pure prediction)
+
+training:
+  epochs: 100
+  batch_size: 512
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  warmup_epochs: 5
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_autoencoder"

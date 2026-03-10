@@ -1,0 +1,50 @@
+# =============================================================================
+# Cross-Sectional Transformer — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_cross_sectional.py --config configs/cross_sectional.yaml
+#
+# Processes all stocks at each date together through cross-stock attention.
+# Learns relative mispricing, sector structure, and crowding.
+#
+# ⚠ Each "sample" is one date (all stocks).  Training is slower than
+#   tabular models since batch_size refers to number of dates, not rows.
+#   With a universe filter the model sees fewer stocks per date.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  d_model: 128              # Stock embedding dimension
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 512
+  dropout: 0.3
+
+training:
+  epochs: 100
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_cross_sectional"

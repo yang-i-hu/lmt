@@ -1,7 +1,7 @@
 # =============================================================================
-# ElasticNet Rolling Per-Snapshot Training Configuration (v2)
+# DNN (MLP) — Rolling Per-Snapshot Configuration (v2)
 # =============================================================================
-# Use with: python train_elasticnet.py --config config_elasticnet.yaml
+# Use with: python train_dnn.py --config configs/dnn.yaml
 #
 # ⚠️ Each snapshot is processed independently — no cross-snapshot merging.
 
@@ -15,24 +15,35 @@ snapshots:
   - "20201231"
 
 # OOS end dates for each snapshot
+# Each snapshot's OOS evaluation period: (cutoff, oos_end]
 snapshot_oos_end:
   "20181228": 20191231
   "20191231": 20201231
   "20201231": 20211231
 
+# Universe filter (optional — leave empty or remove to use all stocks)
+# Path to a text file with one instrument code per line (e.g. 000001)
+universe_file: ""  # e.g. "../universe.txt"
+
 # Factor keys to train (each key gets an independent model)
 factor_keys: ["0", "1", "2"]
 
-# Model parameters
+# Model architecture
 model:
-  alpha: 0.01           # Regularization strength
-  l1_ratio: 0.5         # 0=Ridge, 1=Lasso, 0.5=balanced
-  max_iter: 2000        # Maximum iterations
-  tol: 0.0001           # Convergence tolerance
-  fit_intercept: true
+  hidden_sizes: [512, 256, 128, 64]
+  dropout: 0.3
+  activation: "leaky_relu"  # relu, leaky_relu, elu, gelu, tanh
+  batch_norm: true
 
 # Training parameters
 training:
+  epochs: 100
+  batch_size: 512
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  warmup_epochs: 5              # Linear LR warmup before cosine decay
+  early_stopping_patience: 15
+  val_ratio: 0.15  # Last 15% of IS dates for validation (temporal split)
   random_seed: 42
 
 # LMT API evaluation
@@ -42,4 +53,4 @@ evaluation:
 
 # Output (per-snapshot results saved under {output_dir}/{snapshot}/)
 output:
-  output_dir: "outputs_elasticnet"
+  output_dir: "outputs_dnn"

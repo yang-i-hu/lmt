@@ -1,24 +1,17 @@
 """
-DNN Factor Reweight — Rolling Per-Snapshot Training & Evaluation (v2)
+Common utilities for rolling per-snapshot training pipelines (v2).
 
-Pipeline:
-  For each snapshot folder independently:
-    1. Load IS data → train 3 DNN models (keys 0, 1, 2)
-    2. Load OOS data → predict → compute ensemble
-    3. Run LMT API evaluation on that snapshot's OOS
-    4. Save per-snapshot artifacts
+Reusable across all model architectures (DNN, ResidualMLP, Autoencoder,
+FactorTransformer, CrossSectional, Temporal).
 
-  After all snapshots:
-    5. Concatenate all OOS predictions chronologically
-    6. Run aggregate LMT API evaluation
-    7. Generate rolling backtest report
-
-⚠️ Data from different snapshot folders is NEVER merged for training.
-
-Usage:
-    python train_dnn.py --config configs/dnn.yaml
-    python train_dnn.py --config configs/dnn.yaml --device cuda:0
-    python train_dnn.py --config configs/dnn.yaml --snapshots 20181228 20191231
+Provides:
+  - Logging:    setup_logging, log_banner, log_kv, log_section
+  - Config:     load_config
+  - Data:       load_universe, load_snapshot_data
+  - Training:   EarlyStopping, prepare_tabular_data, train_tabular_model,
+                predict_tabular_oos
+  - Evaluation: run_lmt_api_evaluation
+  - Pipeline:   process_snapshot_tabular, run_tabular_pipeline
 """
 
 import argparse
@@ -28,7 +21,7 @@ import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, Tuple, List, Optional, Callable
 
 import numpy as np
 import pandas as pd
@@ -43,7 +36,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-# LMT API
+# LMT API (optional)
 try:
     from lmt_data_api.api import DataApi
     LMT_API_AVAILABLE = True
@@ -52,10 +45,13 @@ except ImportError:
 
 
 # =============================================================================
-# Default Configuration
+# Constants
 # =============================================================================
 
-DEFAULT_CONFIG = {
+SEPARATOR = "─" * 72
+DOUBLE_SEP = "═" * 72
+
+BASE_DEFAULT_CONFIG = {
     "data_dir": "data/",
     "snapshots": ["20181228", "20191231", "20201231"],
     "snapshot_oos_end": {
@@ -64,12 +60,6 @@ DEFAULT_CONFIG = {
         "20201231": 20211231,
     },
     "factor_keys": ["0", "1", "2"],
-    "model": {
-        "hidden_sizes": [512, 256, 128, 64],
-        "dropout": 0.3,
-        "activation": "leaky_relu",
-        "batch_norm": True,
-    },
     "training": {
         "epochs": 100,
         "batch_size": 512,
@@ -81,21 +71,16 @@ DEFAULT_CONFIG = {
         "random_seed": 42,
     },
     "evaluation": {"label_period": 10, "alpha": 1},
-    "output": {"output_dir": "outputs_dnn"},
 }
 
 
 # =============================================================================
-# Logging helpers
+# Logging
 # =============================================================================
 
-SEPARATOR = "─" * 72
-DOUBLE_SEP = "═" * 72
-
-
-def setup_logging(log_file: Path = None) -> logging.Logger:
-    logger = logging.getLogger("DNN")
-    logger.setLevel(logging.INFO)
+def setup_logging(log_file: Path = None, name: str = "Train") -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
     logger.handlers = []
 
     fmt = logging.Formatter(
@@ -139,109 +124,55 @@ def log_section(logger, title: str):
 
 
 # =============================================================================
-# DNN Model
+# Configuration
 # =============================================================================
 
-class FactorDNN(nn.Module):
-    """Deep Neural Network for Factor Reweight Prediction."""
+def load_config(config_path: str, default_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Load YAML config and merge with defaults.
 
-    def __init__(
-        self,
-        input_size: int,
-        hidden_sizes: List[int],
-        dropout: float = 0.3,
-        activation: str = "leaky_relu",
-        batch_norm: bool = True,
-    ):
-        super().__init__()
+    Deep-merges model-specific defaults with BASE_DEFAULT_CONFIG,
+    then overlays user config on top.
+    """
+    # Start from base
+    config = _deep_copy_dict(BASE_DEFAULT_CONFIG)
 
-        activations = {
-            "relu": nn.ReLU(),
-            "leaky_relu": nn.LeakyReLU(0.1),
-            "elu": nn.ELU(),
-            "gelu": nn.GELU(),
-            "tanh": nn.Tanh(),
-        }
-        act_fn = activations.get(activation, nn.LeakyReLU(0.1))
+    # Merge model-specific defaults
+    if default_config:
+        _deep_merge(config, default_config)
 
-        layers = []
-        prev = input_size
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            if batch_norm:
-                layers.append(nn.BatchNorm1d(h))
-            layers.append(act_fn)
-            layers.append(nn.Dropout(dropout))
-            prev = h
-        layers.append(nn.Linear(prev, 1))
+    # Merge user config file
+    if Path(config_path).exists():
+        with open(config_path, "r") as f:
+            user_config = yaml.safe_load(f) or {}
+        _deep_merge(config, user_config)
 
-        self.network = nn.Sequential(*layers)
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="leaky_relu")
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.network(x).squeeze(-1)
-
-    def count_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+    return config
 
 
-# =============================================================================
-# Early Stopping
-# =============================================================================
-
-class EarlyStopping:
-    def __init__(self, patience: int = 10, min_delta: float = 0.0001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_score = None
-        self.best_model_state = None
-        self.early_stop = False
-
-    def __call__(self, score: float, model: nn.Module) -> bool:
-        if self.best_score is None or score < self.best_score - self.min_delta:
-            self.best_score = score
-            self.best_model_state = {
-                k: v.cpu().clone() for k, v in model.state_dict().items()
-            }
-            self.counter = 0
+def _deep_copy_dict(d):
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = _deep_copy_dict(v)
+        elif isinstance(v, list):
+            out[k] = list(v)
         else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        return self.early_stop
+            out[k] = v
+    return out
 
-    def load_best_model(self, model: nn.Module):
-        if self.best_model_state:
-            model.load_state_dict(self.best_model_state)
+
+def _deep_merge(base: dict, override: dict):
+    """Recursively merge override into base (in-place)."""
+    for k, v in override.items():
+        if isinstance(v, dict) and k in base and isinstance(base[k], dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
 
 
 # =============================================================================
 # Data Loading
 # =============================================================================
-
-def load_config(config_path: str) -> Dict[str, Any]:
-    if Path(config_path).exists():
-        with open(config_path, "r") as f:
-            user_config = yaml.safe_load(f) or {}
-    else:
-        user_config = {}
-
-    config = DEFAULT_CONFIG.copy()
-    for key, value in user_config.items():
-        if isinstance(value, dict) and key in config and isinstance(config[key], dict):
-            config[key].update(value)
-        else:
-            config[key] = value
-    return config
-
 
 def load_universe(path: str, logger: logging.Logger) -> Optional[set]:
     """Load instrument universe from a text file (one code per line)."""
@@ -261,6 +192,7 @@ def load_snapshot_data(
     data_dir: Path, snapshot: str, key: str, split: str,
     logger: logging.Logger, universe: Optional[set] = None,
 ) -> Tuple[pd.DataFrame, pd.Series]:
+    """Load IS or OOS parquet for one (snapshot, key, split)."""
     file_path = data_dir / snapshot / f"factors_{key}_{split}.parquet"
     if not file_path.exists():
         raise FileNotFoundError(f"Data file not found: {file_path}")
@@ -291,15 +223,175 @@ def load_snapshot_data(
 
 
 # =============================================================================
-# Training
+# Training Utilities
 # =============================================================================
 
-def prepare_data(
+class EarlyStopping:
+    """Tracks validation loss and saves best model state."""
+
+    def __init__(self, patience: int = 10, min_delta: float = 0.0001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_score = None
+        self.best_model_state = None
+        self.early_stop = False
+
+    def __call__(self, score: float, model: nn.Module) -> bool:
+        if self.best_score is None or score < self.best_score - self.min_delta:
+            self.best_score = score
+            self.best_model_state = {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            }
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        return self.early_stop
+
+    def load_best_model(self, model: nn.Module):
+        if self.best_model_state:
+            model.load_state_dict(self.best_model_state)
+
+
+def count_parameters(model: nn.Module) -> int:
+    """Count trainable parameters in a model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# =============================================================================
+# LMT API Evaluation
+# =============================================================================
+
+def run_lmt_api_evaluation(
+    pred_ensemble: pd.Series,
+    logger: logging.Logger,
+    config: Dict[str, Any],
+    label: str = "",
+    output_dir: Path = None,
+) -> Dict[str, Any]:
+    """Run LMT group-return + IC evaluation and save results."""
+    if not LMT_API_AVAILABLE:
+        logger.warning("  lmt_data_api not available — skipping API evaluation")
+        return {"status": "skipped", "reason": "lmt_data_api not installed"}
+
+    eval_cfg = config.get("evaluation", {})
+    label_period = eval_cfg.get("label_period", 10)
+    alpha_param = eval_cfg.get("alpha", 1)
+
+    pred_esem = pred_ensemble.copy()
+    pred_esem.name = "factor"
+    if pred_esem.index.names == ["date", "instrument"]:
+        pred_esem.index = pred_esem.index.rename(["date", "code"])
+    pred_esem = pred_esem[~pred_esem.index.duplicated(keep="last")]
+
+    n_dates = pred_esem.index.get_level_values("date").nunique()
+    if n_dates < label_period:
+        logger.warning(f"  Insufficient dates for LMT API: {n_dates} < {label_period}")
+        return {"status": "skipped", "reason": f"dates {n_dates} < {label_period}"}
+
+    try:
+        api = DataApi()
+        group_re, group_ir, group_hs = api.da_eva_group_return(
+            pred_esem, "factor", alpha=alpha_param, label_period=label_period
+        )
+        ic_df = api.da_eva_ic(pred_esem, "factor", label_period)
+
+        results = {
+            "status": "success",
+            "ic_df": ic_df.to_dict() if ic_df is not None else None,
+            "group_re": group_re.to_dict() if group_re is not None else None,
+            "group_ir": group_ir.to_dict() if group_ir is not None else None,
+            "group_hs": group_hs.to_dict() if group_hs is not None else None,
+        }
+
+        # Save full API results to CSV
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            saved = []
+            for name, obj in [("lmt_ic", ic_df), ("lmt_group_return", group_re),
+                              ("lmt_group_ir", group_ir), ("lmt_group_hs", group_hs)]:
+                if obj is None:
+                    continue
+                csv_p = output_dir / f"{name}.csv"
+                if isinstance(obj, pd.Series):
+                    obj.to_frame().to_csv(csv_p)
+                else:
+                    obj.to_csv(csv_p)
+                saved.append(csv_p.name)
+            if saved:
+                logger.info(f"    API data saved → {', '.join(saved)}")
+
+        if all(x is not None for x in [ic_df, group_re, group_ir, group_hs]):
+            try:
+                logger.debug(f"  API return shapes — ic_df: {getattr(ic_df, 'shape', '?')}, "
+                             f"group_re: {getattr(group_re, 'shape', '?')}, "
+                             f"group_ir: {getattr(group_ir, 'shape', '?')}, "
+                             f"group_hs: {getattr(group_hs, 'shape', '?')}")
+
+                parts, col_names = [], []
+
+                if isinstance(ic_df, pd.Series):
+                    parts.append(ic_df.rename("IC"))
+                    col_names.append("IC")
+                elif isinstance(ic_df, pd.DataFrame):
+                    parts.append(ic_df)
+                    ic_cols = list(ic_df.columns)
+                    if len(ic_cols) == 1:
+                        col_names.extend(["IC"])
+                    elif len(ic_cols) == 2:
+                        col_names.extend(["IC", "ICIR"])
+                    else:
+                        col_names.extend([f"IC_{c}" for c in ic_cols])
+
+                grp_targets = ["group0", "group9", "ls"]
+                for df, prefix, cols_wanted in [
+                    (group_re, "", grp_targets),
+                    (group_ir, "IR_", grp_targets),
+                    (group_hs, "HS_", ["group0", "group9"]),
+                ]:
+                    avail = [c for c in cols_wanted if c in df.columns]
+                    if avail:
+                        parts.append(df[avail])
+                        name_map = {"group0": "Short", "group9": "Long", "ls": "LS"}
+                        col_names.extend([prefix + name_map.get(c, c) for c in avail])
+
+                if parts:
+                    summary = pd.concat(parts, axis=1)
+                    summary.columns = col_names
+                    log_section(logger, f"LMT API Results {label}")
+                    logger.info(f"\n{summary.to_string()}")
+                    results["summary"] = summary.to_dict()
+
+                    if output_dir is not None:
+                        sum_path = Path(output_dir) / "lmt_summary.csv"
+                        summary.to_csv(sum_path)
+                        logger.info(f"    Summary saved → {sum_path.name}")
+                else:
+                    logger.warning("  No valid data pieces for summary table")
+            except Exception as e:
+                logger.warning(f"  Failed to build summary table: {e}")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"  LMT API evaluation failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+# =============================================================================
+# Standard Tabular Data Preparation
+# =============================================================================
+
+def prepare_tabular_data(
     X: pd.DataFrame,
     y: pd.Series,
     config: Dict[str, Any],
     logger: logging.Logger,
 ) -> Tuple[DataLoader, DataLoader, StandardScaler]:
+    """Temporal train/val split → scale → DataLoaders."""
     tp = config.get("training", {})
     val_ratio = tp.get("val_ratio", 0.15)
     batch_size = tp.get("batch_size", 4096)
@@ -313,7 +405,6 @@ def prepare_data(
         logger.info(f"    Filling {nan_count:,} NaN values with column median")
         X = X.fillna(X.median()).fillna(0)
 
-    # Temporal split for validation
     dates = X.index.get_level_values("date").unique().sort_values()
     n_dates = len(dates)
     val_start = int(n_dates * (1 - val_ratio))
@@ -342,7 +433,11 @@ def prepare_data(
     return train_loader, val_loader, scaler
 
 
-def train_model(
+# =============================================================================
+# Standard Tabular Training Loop
+# =============================================================================
+
+def train_tabular_model(
     model: nn.Module,
     train_loader: DataLoader,
     val_loader: DataLoader,
@@ -350,6 +445,11 @@ def train_model(
     device: torch.device,
     logger: logging.Logger,
 ) -> Dict[str, List]:
+    """Standard training loop for any tabular nn.Module.
+
+    Supports models with an optional ``compute_loss(x, y, criterion)`` method
+    for custom loss computation (e.g. autoencoder reconstruction loss).
+    """
     tp = config.get("training", {})
     epochs = tp.get("epochs", 100)
     lr = tp.get("learning_rate", 0.0001)
@@ -373,28 +473,32 @@ def train_model(
     )
     early_stopping = EarlyStopping(patience=patience)
 
+    has_custom_loss = hasattr(model, "compute_loss")
+
     history = {"train_loss": [], "val_loss": [], "val_ic": []}
 
-    # Epoch log header
     logger.info(f"    {'Epoch':>6s}  │  {'Train Loss':>10s}  │  "
                 f"{'Val Loss':>10s}  │  {'Val IC':>8s}  │  {'LR':>10s}")
     logger.info(f"    {'─'*6}──┼──{'─'*10}──┼──{'─'*10}──┼──{'─'*8}──┼──{'─'*10}")
 
     for epoch in range(epochs):
-        # Train
+        # ── Train ──
         model.train()
         train_loss = 0.0
         for X_b, y_b in train_loader:
             X_b, y_b = X_b.to(device), y_b.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(X_b), y_b)
+            if has_custom_loss:
+                loss = model.compute_loss(X_b, y_b, criterion)
+            else:
+                loss = criterion(model(X_b), y_b)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
-        # Validate
+        # ── Validate ──
         model.eval()
         val_loss = 0.0
         all_preds, all_targets = [], []
@@ -430,6 +534,10 @@ def train_model(
             logger.info(f"    ⤷ Restored best model (val_loss={early_stopping.best_score:.6f})")
             break
 
+    # Always restore best model
+    if not early_stopping.early_stop:
+        early_stopping.load_best_model(model)
+
     best_epoch = int(np.argmin(history["val_loss"])) + 1
     best_ic = history["val_ic"][best_epoch - 1]
     logger.info(f"    Best epoch: {best_epoch}  │  "
@@ -439,10 +547,10 @@ def train_model(
 
 
 # =============================================================================
-# Prediction & Evaluation
+# Standard Tabular OOS Prediction
 # =============================================================================
 
-def predict_oos(
+def predict_tabular_oos(
     model: nn.Module,
     X_oos: pd.DataFrame,
     y_oos: pd.Series,
@@ -450,6 +558,7 @@ def predict_oos(
     device: torch.device,
     logger: logging.Logger,
 ) -> Tuple[pd.Series, Dict[str, Any]]:
+    """Predict OOS and compute metrics for a tabular model."""
     X_clean = X_oos.fillna(X_oos.median()).fillna(0)
     X_scaled = scaler.transform(X_clean.values)
     X_t = torch.FloatTensor(X_scaled).to(device)
@@ -475,146 +584,34 @@ def predict_oos(
     return pred_s, metrics
 
 
-def run_lmt_api_evaluation(
-    pred_ensemble: pd.Series,
-    logger: logging.Logger,
-    config: Dict[str, Any],
-    label: str = "",
-    output_dir: Path = None,
-) -> Dict[str, Any]:
-    if not LMT_API_AVAILABLE:
-        logger.warning("  lmt_data_api not available — skipping API evaluation")
-        return {"status": "skipped", "reason": "lmt_data_api not installed"}
-
-    eval_cfg = config.get("evaluation", {})
-    label_period = eval_cfg.get("label_period", 10)
-    alpha_param = eval_cfg.get("alpha", 1)
-
-    pred_esem = pred_ensemble.copy()
-    pred_esem.name = "factor"
-    if pred_esem.index.names == ["date", "instrument"]:
-        pred_esem.index = pred_esem.index.rename(["date", "code"])
-    pred_esem = pred_esem[~pred_esem.index.duplicated(keep="last")]
-
-    n_dates = pred_esem.index.get_level_values("date").nunique()
-    if n_dates < label_period:
-        logger.warning(f"  Insufficient dates for LMT API: {n_dates} < {label_period}")
-        return {"status": "skipped", "reason": f"dates {n_dates} < {label_period}"}
-
-    try:
-        api = DataApi()
-        group_re, group_ir, group_hs = api.da_eva_group_return(
-            pred_esem, "factor", alpha=alpha_param, label_period=label_period
-        )
-        ic_df = api.da_eva_ic(pred_esem, "factor", label_period)
-
-        results = {
-            "status": "success",
-            "ic_df": ic_df.to_dict() if ic_df is not None else None,
-            "group_re": group_re.to_dict() if group_re is not None else None,
-            "group_ir": group_ir.to_dict() if group_ir is not None else None,
-            "group_hs": group_hs.to_dict() if group_hs is not None else None,
-        }
-
-        # ── Save full API results to CSV ──
-        if output_dir is not None:
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            saved = []
-            for name, obj in [("lmt_ic", ic_df), ("lmt_group_return", group_re),
-                              ("lmt_group_ir", group_ir), ("lmt_group_hs", group_hs)]:
-                if obj is None:
-                    continue
-                csv_p = output_dir / f"{name}.csv"
-                if isinstance(obj, pd.Series):
-                    obj.to_frame().to_csv(csv_p)
-                else:
-                    obj.to_csv(csv_p)
-                saved.append(csv_p.name)
-            if saved:
-                logger.info(f"    API data saved → {', '.join(saved)}")
-
-        if all(x is not None for x in [ic_df, group_re, group_ir, group_hs]):
-            try:
-                logger.debug(f"  API return shapes — ic_df: {getattr(ic_df, 'shape', '?')}, "
-                             f"group_re: {getattr(group_re, 'shape', '?')}, "
-                             f"group_ir: {getattr(group_ir, 'shape', '?')}, "
-                             f"group_hs: {getattr(group_hs, 'shape', '?')}")
-
-                # Build summary pieces dynamically
-                parts = []
-                col_names = []
-
-                # IC piece — could be Series (1 col) or DataFrame (2 cols)
-                if isinstance(ic_df, pd.Series):
-                    parts.append(ic_df.rename("IC"))
-                    col_names.append("IC")
-                elif isinstance(ic_df, pd.DataFrame):
-                    parts.append(ic_df)
-                    ic_cols = list(ic_df.columns)
-                    if len(ic_cols) == 1:
-                        col_names.extend(["IC"])
-                    elif len(ic_cols) == 2:
-                        col_names.extend(["IC", "ICIR"])
-                    else:
-                        col_names.extend([f"IC_{c}" for c in ic_cols])
-
-                # Group return / IR / HS — pick available columns
-                grp_targets = ["group0", "group9", "ls"]
-                for df, prefix, cols_wanted in [
-                    (group_re, "", grp_targets),
-                    (group_ir, "IR_", grp_targets),
-                    (group_hs, "HS_", ["group0", "group9"]),
-                ]:
-                    avail = [c for c in cols_wanted if c in df.columns]
-                    if avail:
-                        parts.append(df[avail])
-                        name_map = {"group0": "Short", "group9": "Long", "ls": "LS"}
-                        col_names.extend([prefix + name_map.get(c, c) for c in avail])
-
-                if parts:
-                    summary = pd.concat(parts, axis=1)
-                    summary.columns = col_names
-                    log_section(logger, f"LMT API Results {label}")
-                    logger.info(f"\n{summary.to_string()}")
-                    results["summary"] = summary.to_dict()
-
-                    # Save summary CSV
-                    if output_dir is not None:
-                        sum_path = output_dir / "lmt_summary.csv"
-                        summary.to_csv(sum_path)
-                        logger.info(f"    Summary saved → {sum_path.name}")
-                else:
-                    logger.warning("  No valid data pieces for summary table")
-            except Exception as e:
-                logger.warning(f"  Failed to build summary table: {e}")
-
-        return results
-
-    except Exception as e:
-        logger.error(f"  LMT API evaluation failed: {e}")
-        return {"status": "error", "error": str(e)}
-
-
 # =============================================================================
-# Per-Snapshot Processing
+# Process Snapshot (generic tabular model)
 # =============================================================================
 
-def process_snapshot(
+def process_snapshot_tabular(
     snapshot: str,
     config: Dict[str, Any],
     run_dir: Path,
     device: torch.device,
     logger: logging.Logger,
-    universe: Optional[set] = None,
+    universe: Optional[set],
+    model_factory: Callable[[int, Dict[str, Any]], nn.Module],
+    model_prefix: str,
 ) -> Dict[str, Any]:
-    """Process a single snapshot: train → predict → evaluate → save."""
+    """Process one snapshot: load → train → predict → evaluate → save.
+
+    Parameters
+    ----------
+    model_factory : callable(input_size, config) -> nn.Module
+        Creates a fresh model for each factor key.
+    model_prefix : str
+        File-name prefix (e.g. "resmlp", "ae", "ftrans").
+    """
     data_dir = Path(config.get("data_dir", "data/"))
     factor_keys = config.get("factor_keys", ["0", "1", "2"])
     cutoff = int(snapshot)
     oos_end = config.get("snapshot_oos_end", {}).get(snapshot, cutoff + 10000)
 
-    # Per-snapshot output directory
     snap_dir = run_dir / f"snapshot_{snapshot}"
     snap_dir.mkdir(parents=True, exist_ok=True)
 
@@ -622,47 +619,43 @@ def process_snapshot(
 
     all_predictions = {}
     all_metrics = {}
-    model_config = config.get("model", {})
 
     for key in factor_keys:
         log_section(logger, f"Key {key}  —  Snapshot {snapshot}")
 
-        # Load IS data
+        # Load IS
         X_is, y_is = load_snapshot_data(data_dir, snapshot, key, "is", logger, universe)
         feature_names = list(X_is.columns)
 
         # Prepare data
-        train_loader, val_loader, scaler = prepare_data(X_is, y_is, config, logger)
+        train_loader, val_loader, scaler = prepare_tabular_data(X_is, y_is, config, logger)
 
         # Build model
-        model = FactorDNN(
-            input_size=len(feature_names),
-            hidden_sizes=model_config.get("hidden_sizes", [512, 256, 128, 64]),
-            dropout=model_config.get("dropout", 0.3),
-            activation=model_config.get("activation", "leaky_relu"),
-            batch_norm=model_config.get("batch_norm", True),
-        ).to(device)
-        logger.info(f"    Model: {model.count_parameters():,} parameters  │  device={device}")
+        model = model_factory(len(feature_names), config).to(device)
+        if hasattr(model, "_use_checkpoint"):
+            model._use_checkpoint = config.get("model", {}).get("gradient_checkpointing", False)
+        n_params = count_parameters(model)
+        logger.info(f"    Model: {n_params:,} parameters  │  device={device}")
 
         # Train
-        history = train_model(model, train_loader, val_loader, config, device, logger)
+        history = train_tabular_model(model, train_loader, val_loader, config, device, logger)
 
         # Load OOS & predict
         X_oos, y_oos = load_snapshot_data(data_dir, snapshot, key, "oos", logger, universe)
-        preds, metrics = predict_oos(model, X_oos, y_oos, scaler, device, logger)
+        preds, metrics = predict_tabular_oos(model, X_oos, y_oos, scaler, device, logger)
 
         all_predictions[key] = preds
         all_metrics[key] = metrics
 
-        # ── Save per-key artifacts ──
-        model_path = snap_dir / f"dnn_key{key}_model.pt"
-        scaler_path = snap_dir / f"dnn_key{key}_scaler.pkl"
-        pred_path = snap_dir / f"dnn_key{key}_oos_predictions.parquet"
-        hist_path = snap_dir / f"dnn_key{key}_training_history.json"
+        # Save per-key artifacts
+        model_path = snap_dir / f"{model_prefix}_key{key}_model.pt"
+        scaler_path = snap_dir / f"{model_prefix}_key{key}_scaler.pkl"
+        pred_path = snap_dir / f"{model_prefix}_key{key}_oos_predictions.parquet"
+        hist_path = snap_dir / f"{model_prefix}_key{key}_training_history.json"
 
         torch.save({
             "model_state_dict": model.state_dict(),
-            "model_config": model_config,
+            "model_config": config.get("model", {}),
             "feature_names": feature_names,
             "snapshot": snapshot,
             "key": key,
@@ -677,7 +670,7 @@ def process_snapshot(
             json.dump(history, f, indent=2)
 
         logger.info(f"    Saved → {model_path.name}, {scaler_path.name}, "
-                     f"{pred_path.name}, {hist_path.name}")
+                    f"{pred_path.name}, {hist_path.name}")
 
         # Free memory
         del X_is, y_is, train_loader, val_loader, model
@@ -695,10 +688,9 @@ def process_snapshot(
     logger.info(f"    Ensemble: {len(pred_ensemble):,} samples, "
                 f"{dates.nunique()} dates ({dates.min()} → {dates.max()})")
 
-    ensemble_path = snap_dir / "dnn_ensemble_oos.parquet"
+    ensemble_path = snap_dir / f"{model_prefix}_ensemble_oos.parquet"
     pred_ensemble.to_frame().to_parquet(ensemble_path)
 
-    # ── Simple CSV for easy reuse ──
     csv_path = snap_dir / "oos_predictions.csv"
     csv_df = pred_ensemble.reset_index()
     csv_df.columns = ["date", "code", "prediction"]
@@ -706,13 +698,13 @@ def process_snapshot(
     csv_df.to_csv(csv_path, index=False)
     logger.info(f"    CSV saved → {csv_path.name}  ({len(csv_df):,} rows)")
 
-    # ── LMT API eval ──
+    # LMT API eval
     lmt_results = run_lmt_api_evaluation(
         pred_ensemble, logger, config, label=f"Snapshot {snapshot}",
         output_dir=snap_dir,
     )
 
-    # ── Per-snapshot report ──
+    # Per-snapshot report
     snapshot_report = {
         "snapshot": snapshot,
         "cutoff_date": cutoff,
@@ -740,12 +732,26 @@ def process_snapshot(
 
 
 # =============================================================================
-# Main Pipeline
+# Full Pipeline Runner (tabular models)
 # =============================================================================
 
-def main(config_path: str, device: str = None, snapshots_override: List[str] = None,
-         universe_override: str = None):
-    config = load_config(config_path)
+def run_tabular_pipeline(
+    config_path: str,
+    device: str = None,
+    snapshots_override: List[str] = None,
+    universe_override: str = None,
+    default_config: Dict[str, Any] = None,
+    model_factory: Callable[[int, Dict[str, Any]], nn.Module] = None,
+    pipeline_name: str = "Model",
+    model_prefix: str = "model",
+) -> Dict[str, Any]:
+    """End-to-end rolling per-snapshot pipeline for any tabular model.
+
+    Phase 1: Train & evaluate each snapshot independently.
+    Phase 2: Aggregate all OOS predictions & run LMT API.
+    Phase 3: Summary report.
+    """
+    config = load_config(config_path, default_config)
 
     if universe_override is not None:
         config["universe_file"] = universe_override
@@ -757,43 +763,40 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     if not data_dir.is_absolute():
         config["data_dir"] = str(script_dir / data_dir)
 
-    # Create timestamped run directory
+    # Timestamped run directory
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_base = script_dir / config.get("output", {}).get("output_dir", "outputs_dnn")
+    output_base = script_dir / config.get("output", {}).get("output_dir", f"outputs_{model_prefix}")
     run_dir = output_base / f"run_{run_ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
     config["output"]["output_dir"] = str(run_dir)
 
-    # Latest run marker
     latest_marker = output_base / "latest_run.txt"
     latest_marker.write_text(str(run_dir))
 
     log_file = run_dir / "training.log"
-    logger = setup_logging(log_file)
+    logger = setup_logging(log_file, name=pipeline_name)
 
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
     snapshots = snapshots_override or config.get("snapshots", ["20181228", "20191231", "20201231"])
-    mp = config.get("model", {})
     tp = config.get("training", {})
+    mc = config.get("model", {})
 
-    # Save config snapshot
+    # Save config
     with open(run_dir / "config_used.yaml", "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Header
-    # ─────────────────────────────────────────────────────────────────────
-    log_banner(logger, "DNN  —  ROLLING PER-SNAPSHOT PIPELINE (v2)")
+    # ── Header ──
+    log_banner(logger, f"{pipeline_name}  —  ROLLING PER-SNAPSHOT PIPELINE (v2)")
     log_kv(logger, "Config", config_path)
     log_kv(logger, "Run directory", run_dir)
     log_kv(logger, "Data directory", config["data_dir"])
     log_kv(logger, "Device", device)
     log_kv(logger, "Snapshots", " → ".join(snapshots))
-    log_kv(logger, "Factor keys", ", ".join(config.get("factor_keys", ["0","1","2"])))
-    log_kv(logger, "Architecture", f"{mp.get('hidden_sizes')}  dropout={mp.get('dropout')}")
+    log_kv(logger, "Factor keys", ", ".join(config.get("factor_keys", ["0", "1", "2"])))
+    log_kv(logger, "Model config", json.dumps(mc, default=str))
     log_kv(logger, "Batch size", tp.get("batch_size"))
     log_kv(logger, "Learning rate", tp.get("learning_rate"))
     log_kv(logger, "Max epochs", tp.get("epochs"))
@@ -804,7 +807,7 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     if not LMT_API_AVAILABLE:
         logger.warning("  ⚠ lmt_data_api not installed — API evaluation will be skipped")
 
-    # Load universe filter
+    # Universe
     universe_path = config.get("universe_file", "")
     universe = load_universe(universe_path, logger) if universe_path else None
     if universe:
@@ -814,9 +817,7 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
 
     pipeline_start = datetime.now()
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Phase 1: Rolling per-snapshot training
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Phase 1 ──
     log_banner(logger, "PHASE 1  │  ROLLING PER-SNAPSHOT TRAINING")
 
     all_reports = []
@@ -824,13 +825,14 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
 
     for i, snapshot in enumerate(snapshots, 1):
         logger.info(f"\n  ▶ Snapshot {i}/{len(snapshots)}: {snapshot}")
-        result = process_snapshot(snapshot, config, run_dir, device, logger, universe)
+        result = process_snapshot_tabular(
+            snapshot, config, run_dir, device, logger, universe,
+            model_factory, model_prefix,
+        )
         all_reports.append(result["report"])
         all_oos_preds.append(result["pred_ensemble"])
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Phase 2: Aggregate all OOS predictions
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Phase 2 ──
     log_banner(logger, "PHASE 2  │  AGGREGATE OOS PREDICTIONS")
 
     combined_oos = pd.concat(all_oos_preds).sort_index()
@@ -842,11 +844,10 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     log_kv(logger, "Total dates", dates.nunique())
     log_kv(logger, "Date range", f"{dates.min()} → {dates.max()}")
 
-    agg_pred_path = run_dir / "dnn_ensemble_all_oos.parquet"
+    agg_pred_path = run_dir / f"{model_prefix}_ensemble_all_oos.parquet"
     combined_oos.to_frame().to_parquet(agg_pred_path)
     logger.info(f"    Saved → {agg_pred_path.name}")
 
-    # ── Aggregate CSV ──
     agg_csv_path = run_dir / "oos_predictions_all.csv"
     agg_csv = combined_oos.reset_index()
     agg_csv.columns = ["date", "code", "prediction"]
@@ -859,13 +860,11 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
         output_dir=run_dir,
     )
 
-    # ─────────────────────────────────────────────────────────────────────
-    #  Phase 3: Report
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Phase 3 ──
     log_banner(logger, "PHASE 3  │  SUMMARY")
 
     rolling_report = {
-        "pipeline": "DNN Rolling Per-Snapshot (v2)",
+        "pipeline": f"{pipeline_name} Rolling Per-Snapshot (v2)",
         "run_directory": str(run_dir),
         "timestamp": datetime.now().isoformat(),
         "device": str(device),
@@ -885,11 +884,12 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     with open(report_path, "w") as f:
         json.dump(rolling_report, f, indent=2, default=str)
 
-    # ── Pretty summary table ──
+    # Pretty summary table
     logger.info("")
+    factor_keys = config.get("factor_keys", ["0", "1", "2"])
+    ic_headers = "  ".join(f"{'IC(k'+k+')':>7s}" for k in factor_keys)
     hdr = (f"  {'Snapshot':>10s}  │  {'OOS Range':>21s}  │  "
-           f"{'Days':>5s}  │  {'Samples':>9s}  │  "
-           f"{'IC(k0)':>7s}  {'IC(k1)':>7s}  {'IC(k2)':>7s}")
+           f"{'Days':>5s}  │  {'Samples':>9s}  │  {ic_headers}")
     logger.info(hdr)
     logger.info("  " + "─" * len(hdr.strip()))
 
@@ -898,9 +898,8 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
         dr = rpt.get("oos_date_range", ["?", "?"])
         nd = rpt.get("oos_n_dates", "?")
         ns = rpt.get("oos_n_samples", "?")
-        keys = config.get("factor_keys", ["0", "1", "2"])
         ics = []
-        for k in keys:
+        for k in factor_keys:
             m = rpt.get("metrics_by_key", {}).get(k, {})
             ics.append(f"{m.get('ic', 0):+.4f}")
         logger.info(
@@ -914,7 +913,6 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     log_kv(logger, "All-OOS predictions", agg_pred_path.name)
     log_kv(logger, "Training log", log_file.name)
 
-    # ── Final ──
     pipeline_end = datetime.now()
     duration = pipeline_end - pipeline_start
 
@@ -938,11 +936,14 @@ def main(config_path: str, device: str = None, snapshots_override: List[str] = N
     return rolling_report
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="DNN rolling per-snapshot training & evaluation (v2)"
-    )
-    parser.add_argument("--config", type=str, default="configs/dnn.yaml",
+# =============================================================================
+# CLI helper
+# =============================================================================
+
+def make_parser(description: str, default_config: str) -> argparse.ArgumentParser:
+    """Standard argument parser for training scripts."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--config", type=str, default=default_config,
                         help="Config YAML file")
     parser.add_argument("--device", type=str, default=None,
                         help="Device: cpu, cuda, cuda:0, cuda:1, …")
@@ -950,5 +951,4 @@ if __name__ == "__main__":
                         help="Override snapshot list")
     parser.add_argument("--universe", type=str, default=None,
                         help="Path to universe.txt (one code per line)")
-    args = parser.parse_args()
-    main(args.config, args.device, args.snapshots, args.universe)
+    return parser

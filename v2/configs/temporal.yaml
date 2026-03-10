@@ -1,0 +1,54 @@
+# =============================================================================
+# Temporal Transformer — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_temporal.py --config configs/temporal.yaml
+#
+# Uses a sliding window of historical factor values per stock with
+# causal self-attention.  Models momentum decay, volatility clustering,
+# and regime shifts.
+#
+# ⚠ window_size determines how many historical dates are used as context.
+#   Instruments with fewer than window_size dates in IS are skipped.
+#   The tail of IS data is used as history context for early OOS dates.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  d_model: 128              # Time-step embedding dimension
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 512
+  dropout: 0.3
+  window_size: 20           # Number of historical dates as context
+  pool: "last"              # "last" (causal) or "mean"
+
+training:
+  epochs: 100
+  batch_size: 512
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_temporal"

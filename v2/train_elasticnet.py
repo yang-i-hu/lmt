@@ -1,9 +1,7 @@
 """
 ElasticNet Factor Reweight — Rolling Per-Snapshot Training & Evaluation (v2)
 
-Same rolling per-snapshot pipeline as train_dnn.py but using ElasticNet
-as the model, with coefficient analysis.
-
+Pipeline:
   For each snapshot folder independently:
     1. Load IS data → train 3 ElasticNet models (keys 0, 1, 2)
     2. Analyze coefficients (sparsity, top features)
@@ -17,12 +15,11 @@ as the model, with coefficient analysis.
     8. Generate rolling backtest report
 
 ⚠️ Data from different snapshot folders is NEVER merged for training.
-   Each snapshot is a self-contained training + evaluation unit.
 
 Usage:
-    python train_elasticnet.py --config config_elasticnet.yaml
-    python train_elasticnet.py --config config_elasticnet.yaml --alpha 0.01 --l1_ratio 0.7
-    python train_elasticnet.py --config config_elasticnet.yaml --snapshots 20181228 20191231
+    python train_elasticnet.py --config configs/elasticnet.yaml
+    python train_elasticnet.py --config configs/elasticnet.yaml --alpha 0.01 --l1_ratio 0.7
+    python train_elasticnet.py --config configs/elasticnet.yaml --snapshots 20181228 20191231
 """
 
 import argparse
@@ -49,7 +46,6 @@ try:
     LMT_API_AVAILABLE = True
 except ImportError:
     LMT_API_AVAILABLE = False
-    print("Warning: lmt_data_api not available. API evaluation will be skipped.")
 
 
 # =============================================================================
@@ -70,18 +66,11 @@ DEFAULT_CONFIG = {
         "l1_ratio": 0.5,
         "max_iter": 2000,
         "tol": 0.0001,
-        "fit_intercept": True
+        "fit_intercept": True,
     },
-    "training": {
-        "random_seed": 42
-    },
-    "evaluation": {
-        "label_period": 10,
-        "alpha": 1
-    },
-    "output": {
-        "output_dir": "outputs_elasticnet"
-    }
+    "training": {"random_seed": 42},
+    "evaluation": {"label_period": 10, "alpha": 1},
+    "output": {"output_dir": "outputs_elasticnet"},
 }
 
 
@@ -89,32 +78,52 @@ DEFAULT_CONFIG = {
 # Logging
 # =============================================================================
 
-def setup_logging(log_file: Path = None, name: str = "ElasticNetRolling") -> logging.Logger:
-    logger = logging.getLogger(name)
+SEPARATOR = "─" * 72
+DOUBLE_SEP = "═" * 72
+
+def setup_logging(log_file: Path = None) -> logging.Logger:
+    logger = logging.getLogger("ElasticNet")
     logger.setLevel(logging.INFO)
     logger.handlers = []
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+    fmt = logging.Formatter(
+        "%(asctime)s │ %(levelname)-5s │ %(message)s",
+        datefmt="%H:%M:%S",
     )
-    console_handler.setFormatter(console_format)
-    logger.addHandler(console_handler)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.INFO)
+    console.setFormatter(fmt)
+    logger.addHandler(console)
 
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_format = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        file_handler.setFormatter(file_format)
-        logger.addHandler(file_handler)
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s │ %(levelname)-5s │ %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logger.addHandler(fh)
 
     return logger
+
+
+def log_banner(logger, title: str, char: str = "═"):
+    line = char * 72
+    logger.info("")
+    logger.info(line)
+    logger.info(f"  {title}")
+    logger.info(line)
+
+
+def log_kv(logger, key: str, value, indent: int = 4):
+    logger.info(f"{' ' * indent}{key + ':':<22s} {value}")
+
+
+def log_section(logger, title: str):
+    logger.info("")
+    logger.info(f"── {title} " + "─" * max(0, 68 - len(title)))
 
 
 # =============================================================================
@@ -122,9 +131,8 @@ def setup_logging(log_file: Path = None, name: str = "ElasticNetRolling") -> log
 # =============================================================================
 
 def load_config(config_path: str) -> Dict[str, Any]:
-    """Load config from YAML file, merging with defaults."""
     if Path(config_path).exists():
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             user_config = yaml.safe_load(f) or {}
     else:
         user_config = {}
@@ -138,39 +146,50 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def load_snapshot_data(
-    data_dir: Path, snapshot: str, key: str, split: str, logger: logging.Logger
-) -> Tuple[pd.DataFrame, pd.Series]:
-    """
-    Load IS or OOS data for a specific snapshot and key.
+def load_universe(path: str, logger: logging.Logger) -> Optional[set]:
+    """Load instrument universe from a text file (one code per line)."""
+    p = Path(path)
+    if not path or not p.exists():
+        return None
+    codes = set()
+    for line in p.read_text().strip().splitlines():
+        code = line.strip()
+        if code:
+            codes.add(code)
+    logger.info(f"    Universe loaded: {len(codes)} instruments from {p}")
+    return codes
 
-    Args:
-        data_dir: Base data directory
-        snapshot: Snapshot name (e.g., '20201231')
-        key: Factor key ('0', '1', '2')
-        split: 'is' or 'oos'
-        logger: Logger instance
-    """
+
+def load_snapshot_data(
+    data_dir: Path, snapshot: str, key: str, split: str,
+    logger: logging.Logger, universe: Optional[set] = None,
+) -> Tuple[pd.DataFrame, pd.Series]:
     file_path = data_dir / snapshot / f"factors_{key}_{split}.parquet"
     if not file_path.exists():
         raise FileNotFoundError(f"Data file not found: {file_path}")
 
-    logger.info(f"Loading {split.upper()} data: {file_path}")
     df = pd.read_parquet(file_path)
-
-    label_cols = ['labelValue', 'endDate']
+    label_cols = ["labelValue", "endDate"]
     feature_cols = [c for c in df.columns if c not in label_cols]
     X = df[feature_cols]
-    y = df['labelValue']
+    y = df["labelValue"]
 
-    # Drop NaN labels
-    valid_mask = y.notna()
-    X = X[valid_mask]
-    y = y[valid_mask]
+    valid = y.notna()
+    X, y = X[valid], y[valid]
 
-    dates = X.index.get_level_values('date')
-    logger.info(f"  Shape: {X.shape}, date range: {dates.min()} to {dates.max()} ({dates.nunique()} days)")
+    # Filter by universe
+    if universe is not None:
+        instruments = X.index.get_level_values("instrument")
+        mask = instruments.isin(universe)
+        n_before = len(X)
+        X, y = X[mask], y[mask]
+        logger.info(f"    Universe filter: {n_before:,} → {len(X):,} rows "
+                    f"({len(X)/max(1,n_before):.0%} kept)")
 
+    dates = X.index.get_level_values("date")
+    logger.info(f"    Loaded {split.upper()} key={key}: "
+                f"{X.shape[0]:>8,} rows × {X.shape[1]} cols  │  "
+                f"dates {dates.min()}→{dates.max()} ({dates.nunique()} days)")
     return X, y
 
 
@@ -179,20 +198,16 @@ def load_snapshot_data(
 # =============================================================================
 
 def prepare_data(
-    X: pd.DataFrame,
-    y: pd.Series,
-    logger: logging.Logger
+    X: pd.DataFrame, y: pd.Series, logger: logging.Logger
 ) -> Tuple[np.ndarray, np.ndarray, StandardScaler, List[str]]:
-    """Prepare IS data: fill NaN, scale features."""
     nan_count = X.isna().sum().sum()
     if nan_count > 0:
-        logger.info(f"Filling {nan_count} NaN values with median")
+        logger.info(f"    Filling {nan_count:,} NaN values with column median")
         X = X.fillna(X.median()).fillna(0)
 
     feature_names = list(X.columns)
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X.values)
-
     return X_scaled, y.values, scaler, feature_names
 
 
@@ -200,76 +215,64 @@ def train_elasticnet(
     X_train: np.ndarray,
     y_train: np.ndarray,
     config: Dict[str, Any],
-    logger: logging.Logger
+    logger: logging.Logger,
 ) -> ElasticNet:
-    """Train an ElasticNet model."""
-    model_params = config.get('model', {})
-    alpha = model_params.get('alpha', 0.01)
-    l1_ratio = model_params.get('l1_ratio', 0.5)
-    max_iter = model_params.get('max_iter', 2000)
-    tol = model_params.get('tol', 0.0001)
-    fit_intercept = model_params.get('fit_intercept', True)
-    random_seed = config.get('training', {}).get('random_seed', 42)
-
-    logger.info(f"  ElasticNet(alpha={alpha}, l1_ratio={l1_ratio}, max_iter={max_iter})")
+    mp = config.get("model", {})
+    alpha = mp.get("alpha", 0.01)
+    l1_ratio = mp.get("l1_ratio", 0.5)
+    max_iter = mp.get("max_iter", 2000)
+    tol = mp.get("tol", 0.0001)
+    fit_intercept = mp.get("fit_intercept", True)
+    seed = config.get("training", {}).get("random_seed", 42)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = ElasticNet(
-            alpha=alpha,
-            l1_ratio=l1_ratio,
-            max_iter=max_iter,
-            tol=tol,
-            fit_intercept=fit_intercept,
-            random_state=random_seed
+            alpha=alpha, l1_ratio=l1_ratio, max_iter=max_iter,
+            tol=tol, fit_intercept=fit_intercept, random_state=seed,
         )
-        start_time = datetime.now()
+        t0 = datetime.now()
         model.fit(X_train, y_train)
-        training_time = (datetime.now() - start_time).total_seconds()
+        elapsed = (datetime.now() - t0).total_seconds()
 
-    n_nonzero = int(np.sum(model.coef_ != 0))
-    n_features = len(model.coef_)
-    sparsity = 1 - (n_nonzero / max(1, n_features))
+    n_nz = int(np.sum(model.coef_ != 0))
+    n_feat = len(model.coef_)
+    sparsity = 1 - (n_nz / max(1, n_feat))
 
-    logger.info(f"  Trained in {training_time:.2f}s — "
-                f"Non-zero: {n_nonzero}/{n_features} (sparsity: {sparsity:.1%})")
-
+    logger.info(f"    Trained in {elapsed:.1f}s  │  "
+                f"non-zero {n_nz}/{n_feat} (sparsity {sparsity:.1%})  │  "
+                f"intercept {model.intercept_:.6f}")
     return model
 
 
 def analyze_coefficients(
-    model: ElasticNet,
-    feature_names: List[str],
-    logger: logging.Logger,
-    top_n: int = 20
+    model: ElasticNet, feature_names: List[str], logger: logging.Logger, top_n: int = 10
 ) -> Dict[str, Any]:
-    """Analyze model coefficients."""
     coef_df = pd.DataFrame({
-        'feature': feature_names,
-        'coefficient': model.coef_,
-        'abs_coefficient': np.abs(model.coef_)
-    }).sort_values('abs_coefficient', ascending=False)
+        "feature": feature_names,
+        "coefficient": model.coef_,
+        "abs_coef": np.abs(model.coef_),
+    }).sort_values("abs_coef", ascending=False)
 
-    n_nonzero = int((coef_df['coefficient'] != 0).sum())
-    n_positive = int((coef_df['coefficient'] > 0).sum())
-    n_negative = int((coef_df['coefficient'] < 0).sum())
+    n_nz = int((coef_df["coefficient"] != 0).sum())
+    n_pos = int((coef_df["coefficient"] > 0).sum())
+    n_neg = int((coef_df["coefficient"] < 0).sum())
 
-    logger.info(f"  Coefficients: {n_nonzero} non-zero ({n_positive}+, {n_negative}-)")
+    logger.info(f"    Coefficients: {n_nz} non-zero ({n_pos} positive, {n_neg} negative)")
 
-    if top_n > 0:
-        logger.info(f"  Top {min(top_n, n_nonzero)} features:")
-        for _, row in coef_df.head(top_n).iterrows():
-            if row['coefficient'] != 0:
-                logger.info(f"    {str(row['feature'])[:25]:25s}: {row['coefficient']:+.6f}")
+    top = coef_df.head(top_n)
+    for _, row in top.iterrows():
+        if row["coefficient"] != 0:
+            logger.info(f"      factor {str(row['feature']):>6s}: {row['coefficient']:+.6f}")
 
     return {
-        'n_total': len(coef_df),
-        'n_nonzero': n_nonzero,
-        'n_positive': n_positive,
-        'n_negative': n_negative,
-        'sparsity': float(1 - n_nonzero / max(1, len(coef_df))),
-        'intercept': float(model.intercept_),
-        'top_features': coef_df.head(top_n)[['feature', 'coefficient']].to_dict('records')
+        "n_total": len(coef_df),
+        "n_nonzero": n_nz,
+        "n_positive": n_pos,
+        "n_negative": n_neg,
+        "sparsity": float(1 - n_nz / max(1, len(coef_df))),
+        "intercept": float(model.intercept_),
+        "top_features": coef_df.head(top_n)[["feature", "coefficient"]].to_dict("records"),
     }
 
 
@@ -282,97 +285,148 @@ def predict_oos(
     X_oos: pd.DataFrame,
     y_oos: pd.Series,
     scaler: StandardScaler,
-    logger: logging.Logger
+    logger: logging.Logger,
 ) -> Tuple[pd.Series, Dict[str, Any]]:
-    """Generate OOS predictions and compute basic metrics."""
-    X_oos_clean = X_oos.fillna(X_oos.median()).fillna(0)
-    X_scaled = scaler.transform(X_oos_clean.values)
-    predictions = model.predict(X_scaled)
+    X_clean = X_oos.fillna(X_oos.median()).fillna(0)
+    X_scaled = scaler.transform(X_clean.values)
+    preds = model.predict(X_scaled)
 
-    pred_series = pd.Series(predictions, index=X_oos.index, name='prediction')
+    pred_s = pd.Series(preds, index=X_oos.index, name="prediction")
 
     metrics = {
-        'rmse': float(np.sqrt(mean_squared_error(y_oos, predictions))),
-        'mae': float(mean_absolute_error(y_oos, predictions)),
-        'r2': float(r2_score(y_oos, predictions)),
-        'ic': float(stats.spearmanr(y_oos, predictions)[0]),
-        'n_samples': len(predictions),
-        'n_dates': int(X_oos.index.get_level_values('date').nunique())
+        "rmse": float(np.sqrt(mean_squared_error(y_oos, preds))),
+        "mae": float(mean_absolute_error(y_oos, preds)),
+        "r2": float(r2_score(y_oos, preds)),
+        "ic": float(stats.spearmanr(y_oos, preds)[0]),
+        "n_samples": len(preds),
+        "n_dates": int(X_oos.index.get_level_values("date").nunique()),
     }
 
-    logger.info(f"  OOS — IC: {metrics['ic']:.4f} | R²: {metrics['r2']:.6f} | RMSE: {metrics['rmse']:.6f}")
-    return pred_series, metrics
+    logger.info(f"    OOS metrics  │  IC {metrics['ic']:+.4f}  │  "
+                f"R² {metrics['r2']:.6f}  │  RMSE {metrics['rmse']:.6f}  │  "
+                f"MAE {metrics['mae']:.6f}")
+    return pred_s, metrics
 
 
 def run_lmt_api_evaluation(
     pred_ensemble: pd.Series,
     logger: logging.Logger,
     config: Dict[str, Any],
-    label: str = ""
+    label: str = "",
+    output_dir: Path = None,
 ) -> Dict[str, Any]:
-    """Run LMT API evaluation on an ensemble prediction series."""
     if not LMT_API_AVAILABLE:
-        logger.warning("LMT API not available, skipping evaluation")
-        return {"error": "lmt_data_api not available"}
+        logger.warning("  lmt_data_api not available — skipping API evaluation")
+        return {"status": "skipped", "reason": "lmt_data_api not installed"}
 
-    eval_config = config.get('evaluation', {})
-    label_period = eval_config.get('label_period', 10)
-    alpha_param = eval_config.get('alpha', 1)
+    eval_cfg = config.get("evaluation", {})
+    label_period = eval_cfg.get("label_period", 10)
+    alpha_param = eval_cfg.get("alpha", 1)
 
     pred_esem = pred_ensemble.copy()
-    pred_esem.name = 'factor'
-    if pred_esem.index.names == ['date', 'instrument']:
-        pred_esem.index = pred_esem.index.rename(['date', 'code'])
-    pred_esem = pred_esem[~pred_esem.index.duplicated(keep='last')]
+    pred_esem.name = "factor"
+    if pred_esem.index.names == ["date", "instrument"]:
+        pred_esem.index = pred_esem.index.rename(["date", "code"])
+    pred_esem = pred_esem[~pred_esem.index.duplicated(keep="last")]
 
-    n_dates = pred_esem.index.get_level_values('date').nunique()
-    logger.info(f"LMT API {label}: {n_dates} dates, {len(pred_esem)} samples")
-
+    n_dates = pred_esem.index.get_level_values("date").nunique()
     if n_dates < label_period:
-        logger.warning(f"Insufficient dates for LMT API: {n_dates} < {label_period}")
-        return {"error": f"Insufficient dates: {n_dates} < {label_period}"}
+        logger.warning(f"  Insufficient dates for LMT API: {n_dates} < {label_period}")
+        return {"status": "skipped", "reason": f"dates {n_dates} < {label_period}"}
 
     try:
         api = DataApi()
-
         group_re, group_ir, group_hs = api.da_eva_group_return(
             pred_esem, "factor", alpha=alpha_param, label_period=label_period
         )
         ic_df = api.da_eva_ic(pred_esem, "factor", label_period)
 
         results = {
+            "status": "success",
             "ic_df": ic_df.to_dict() if ic_df is not None else None,
             "group_re": group_re.to_dict() if group_re is not None else None,
             "group_ir": group_ir.to_dict() if group_ir is not None else None,
             "group_hs": group_hs.to_dict() if group_hs is not None else None,
         }
 
-        # Build summary table
-        try:
-            if all(x is not None for x in [ic_df, group_re, group_ir, group_hs]):
-                stats_all = pd.concat([
-                    ic_df,
-                    group_re[["group0", "group9", "ls"]],
-                    group_ir[["group0", "group9", "ls"]],
-                    group_hs[["group0", "group9"]]
-                ], axis=1)
-                stats_all.columns = [
-                    "IC", "ICIR",
-                    "Short", "Long", "LS",
-                    "ShortIr", "LongIr", "LSIR",
-                    "ShortHS", "LongHS"
-                ]
-                logger.info(f"\n{'='*60}\nLMT API RESULTS {label}\n{'='*60}")
-                logger.info(f"\n{stats_all.to_string()}")
-                results["stats_all"] = stats_all.to_dict()
-        except Exception as e:
-            logger.warning(f"Failed to build stats table: {e}")
+        # ── Save full API results to CSV ──
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            saved = []
+            for name, obj in [("lmt_ic", ic_df), ("lmt_group_return", group_re),
+                              ("lmt_group_ir", group_ir), ("lmt_group_hs", group_hs)]:
+                if obj is None:
+                    continue
+                csv_p = output_dir / f"{name}.csv"
+                if isinstance(obj, pd.Series):
+                    obj.to_frame().to_csv(csv_p)
+                else:
+                    obj.to_csv(csv_p)
+                saved.append(csv_p.name)
+            if saved:
+                logger.info(f"    API data saved → {', '.join(saved)}")
+
+        if all(x is not None for x in [ic_df, group_re, group_ir, group_hs]):
+            try:
+                logger.debug(f"  API return shapes — ic_df: {getattr(ic_df, 'shape', '?')}, "
+                             f"group_re: {getattr(group_re, 'shape', '?')}, "
+                             f"group_ir: {getattr(group_ir, 'shape', '?')}, "
+                             f"group_hs: {getattr(group_hs, 'shape', '?')}")
+
+                # Build summary pieces dynamically
+                parts = []
+                col_names = []
+
+                # IC piece — could be Series (1 col) or DataFrame (2 cols)
+                if isinstance(ic_df, pd.Series):
+                    parts.append(ic_df.rename("IC"))
+                    col_names.append("IC")
+                elif isinstance(ic_df, pd.DataFrame):
+                    parts.append(ic_df)
+                    ic_cols = list(ic_df.columns)
+                    if len(ic_cols) == 1:
+                        col_names.extend(["IC"])
+                    elif len(ic_cols) == 2:
+                        col_names.extend(["IC", "ICIR"])
+                    else:
+                        col_names.extend([f"IC_{c}" for c in ic_cols])
+
+                # Group return / IR / HS — pick available columns
+                grp_targets = ["group0", "group9", "ls"]
+                for df, prefix, cols_wanted in [
+                    (group_re, "", grp_targets),
+                    (group_ir, "IR_", grp_targets),
+                    (group_hs, "HS_", ["group0", "group9"]),
+                ]:
+                    avail = [c for c in cols_wanted if c in df.columns]
+                    if avail:
+                        parts.append(df[avail])
+                        name_map = {"group0": "Short", "group9": "Long", "ls": "LS"}
+                        col_names.extend([prefix + name_map.get(c, c) for c in avail])
+
+                if parts:
+                    summary = pd.concat(parts, axis=1)
+                    summary.columns = col_names
+                    log_section(logger, f"LMT API Results {label}")
+                    logger.info(f"\n{summary.to_string()}")
+                    results["summary"] = summary.to_dict()
+
+                    # Save summary CSV
+                    if output_dir is not None:
+                        sum_path = output_dir / "lmt_summary.csv"
+                        summary.to_csv(sum_path)
+                        logger.info(f"    Summary saved → {sum_path.name}")
+                else:
+                    logger.warning("  No valid data pieces for summary table")
+            except Exception as e:
+                logger.warning(f"  Failed to build summary table: {e}")
 
         return results
 
     except Exception as e:
-        logger.error(f"LMT API evaluation failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"  LMT API evaluation failed: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 # =============================================================================
@@ -382,115 +436,121 @@ def run_lmt_api_evaluation(
 def process_snapshot(
     snapshot: str,
     config: Dict[str, Any],
-    logger: logging.Logger
+    run_dir: Path,
+    logger: logging.Logger,
+    universe: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """
-    Process a single snapshot: train models, predict OOS, evaluate.
-
-    Returns a dict with predictions, metrics, and LMT results for this snapshot.
-    """
-    data_dir = Path(config.get('data_dir', 'data/'))
-    output_base = Path(config.get('output', {}).get('output_dir', 'outputs_elasticnet'))
-    snapshot_output = output_base / snapshot
-    snapshot_output.mkdir(parents=True, exist_ok=True)
-
-    factor_keys = config.get('factor_keys', ['0', '1', '2'])
+    """Process a single snapshot: train → predict → evaluate → save."""
+    data_dir = Path(config.get("data_dir", "data/"))
+    factor_keys = config.get("factor_keys", ["0", "1", "2"])
     cutoff = int(snapshot)
-    oos_end = config.get('snapshot_oos_end', {}).get(snapshot, cutoff + 10000)
+    oos_end = config.get("snapshot_oos_end", {}).get(snapshot, cutoff + 10000)
 
-    logger.info("\n" + "=" * 70)
-    logger.info(f"SNAPSHOT: {snapshot}")
-    logger.info(f"  IS:  dates <= {cutoff}")
-    logger.info(f"  OOS: dates > {cutoff} and <= {oos_end}")
-    logger.info("=" * 70)
+    # Per-snapshot output directory
+    snap_dir = run_dir / f"snapshot_{snapshot}"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    log_banner(logger, f"SNAPSHOT {snapshot}  │  IS ≤ {cutoff}  │  OOS ({cutoff+1}, {oos_end}]")
 
     all_predictions = {}
     all_metrics = {}
-    all_coef_analyses = {}
+    all_coef = {}
 
     for key in factor_keys:
-        logger.info(f"\n--- Key {key} ---")
+        log_section(logger, f"Key {key}  —  Snapshot {snapshot}")
 
-        # Load IS data
-        X_is, y_is = load_snapshot_data(data_dir, snapshot, key, 'is', logger)
-
-        # Prepare data
-        X_train, y_train, scaler, feature_names = prepare_data(X_is, y_is, logger)
-        logger.info(f"  Training samples: {len(X_train)}")
+        # Load & prepare IS
+        X_is, y_is = load_snapshot_data(data_dir, snapshot, key, "is", logger, universe)
+        X_train, y_train, scaler, feat_names = prepare_data(X_is, y_is, logger)
+        logger.info(f"    Training on {len(X_train):,} samples, {len(feat_names)} features")
 
         # Train
         model = train_elasticnet(X_train, y_train, config, logger)
+        coef_info = analyze_coefficients(model, feat_names, logger)
+        all_coef[key] = coef_info
 
-        # Analyze coefficients
-        coef_analysis = analyze_coefficients(model, feature_names, logger)
-        all_coef_analyses[key] = coef_analysis
+        # Load & predict OOS
+        X_oos, y_oos = load_snapshot_data(data_dir, snapshot, key, "oos", logger, universe)
+        preds, metrics = predict_oos(model, X_oos, y_oos, scaler, logger)
 
-        # Load OOS data
-        X_oos, y_oos = load_snapshot_data(data_dir, snapshot, key, 'oos', logger)
-
-        # Predict OOS
-        predictions, metrics = predict_oos(model, X_oos, y_oos, scaler, logger)
-
-        all_predictions[key] = predictions
+        all_predictions[key] = preds
         all_metrics[key] = metrics
 
-        # Save model, scaler, coefficients
-        joblib.dump(model, snapshot_output / f'model_key{key}.pkl')
-        joblib.dump(scaler, snapshot_output / f'scaler_key{key}.pkl')
+        # ── Save per-key artifacts ──
+        model_path = snap_dir / f"elasticnet_key{key}_model.pkl"
+        scaler_path = snap_dir / f"elasticnet_key{key}_scaler.pkl"
+        coef_path = snap_dir / f"elasticnet_key{key}_coefficients.csv"
+        pred_path = snap_dir / f"elasticnet_key{key}_oos_predictions.parquet"
 
-        coef_df = pd.DataFrame({
-            'feature': feature_names,
-            'coefficient': model.coef_
-        }).sort_values('coefficient', key=abs, ascending=False)
-        coef_df.to_csv(snapshot_output / f'coefficients_key{key}.csv', index=False)
+        joblib.dump(model, model_path)
+        joblib.dump(scaler, scaler_path)
 
-        # Free memory
+        coef_df = pd.DataFrame(
+            {"feature": feat_names, "coefficient": model.coef_}
+        ).sort_values("coefficient", key=abs, ascending=False)
+        coef_df.to_csv(coef_path, index=False)
+
+        preds.to_frame().to_parquet(pred_path)
+
+        logger.info(f"    Saved → {model_path.name}, {scaler_path.name}, "
+                     f"{coef_path.name}, {pred_path.name}")
+
         del X_is, y_is
 
-    # Compute ensemble
-    logger.info(f"\n--- Ensemble (snapshot {snapshot}) ---")
+    # ── Ensemble ──
+    log_section(logger, f"Ensemble  —  Snapshot {snapshot}")
+
     pred_df = pd.DataFrame(all_predictions)
     pred_ensemble = pred_df.mean(axis=1)
-    pred_ensemble.name = 'prediction'
+    pred_ensemble.name = "prediction"
 
-    dates = pred_ensemble.index.get_level_values('date')
-    logger.info(f"Ensemble: {len(pred_ensemble)} samples, "
-                f"{dates.nunique()} dates ({dates.min()} to {dates.max()})")
+    dates = pred_ensemble.index.get_level_values("date")
+    logger.info(f"    Ensemble: {len(pred_ensemble):,} samples, "
+                f"{dates.nunique()} dates ({dates.min()} → {dates.max()})")
 
-    # Save ensemble predictions
-    pred_ensemble.to_frame().to_parquet(snapshot_output / 'pred_ensemble.parquet')
+    ensemble_path = snap_dir / "elasticnet_ensemble_oos.parquet"
+    pred_ensemble.to_frame().to_parquet(ensemble_path)
 
-    # LMT API evaluation for this snapshot
+    # ── Simple CSV for easy reuse ──
+    csv_path = snap_dir / "oos_predictions.csv"
+    csv_df = pred_ensemble.reset_index()
+    csv_df.columns = ["date", "code", "prediction"]
+    csv_df = csv_df.sort_values(["date", "code"])
+    csv_df.to_csv(csv_path, index=False)
+    logger.info(f"    CSV saved → {csv_path.name}  ({len(csv_df):,} rows)")
+
+    # ── LMT API eval ──
     lmt_results = run_lmt_api_evaluation(
-        pred_ensemble, logger, config, label=f"[Snapshot {snapshot}]"
+        pred_ensemble, logger, config, label=f"Snapshot {snapshot}",
+        output_dir=snap_dir,
     )
 
-    # Build snapshot report
+    # ── Per-snapshot report ──
     snapshot_report = {
-        'snapshot': snapshot,
-        'cutoff_date': cutoff,
-        'oos_end_date': oos_end,
-        'oos_date_range': [int(dates.min()), int(dates.max())],
-        'metrics_by_key': all_metrics,
-        'coefficient_analyses': all_coef_analyses,
-        'ensemble_stats': {
-            'n_samples': len(pred_ensemble),
-            'n_dates': int(dates.nunique())
+        "snapshot": snapshot,
+        "cutoff_date": cutoff,
+        "oos_end_date": oos_end,
+        "oos_date_range": [int(dates.min()), int(dates.max())],
+        "oos_n_dates": int(dates.nunique()),
+        "oos_n_samples": len(pred_ensemble),
+        "metrics_by_key": all_metrics,
+        "coefficient_analysis": all_coef,
+        "lmt_api": lmt_results,
+        "artifacts": {
+            "directory": str(snap_dir),
+            "files": sorted(p.name for p in snap_dir.iterdir()),
         },
-        'lmt_api_results': lmt_results,
-        'timestamp': datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
     }
 
-    # Save per-snapshot report
-    with open(snapshot_output / 'snapshot_report.json', 'w') as f:
+    report_path = snap_dir / "snapshot_report.json"
+    with open(report_path, "w") as f:
         json.dump(snapshot_report, f, indent=2, default=str)
 
-    logger.info(f"✅ Snapshot {snapshot} complete → {snapshot_output}/")
+    logger.info(f"    Report saved → {report_path.name}")
+    logger.info(f"  ✅ Snapshot {snapshot} complete  ({len(list(snap_dir.iterdir()))} files)")
 
-    return {
-        'report': snapshot_report,
-        'pred_ensemble': pred_ensemble
-    }
+    return {"report": snapshot_report, "pred_ensemble": pred_ensemble}
 
 
 # =============================================================================
@@ -501,130 +561,192 @@ def main(
     config_path: str,
     override_alpha: float = None,
     override_l1_ratio: float = None,
-    snapshots_override: List[str] = None
+    snapshots_override: List[str] = None,
+    universe_override: str = None,
 ):
     config = load_config(config_path)
 
     if override_alpha is not None:
-        config.setdefault('model', {})['alpha'] = override_alpha
+        config.setdefault("model", {})["alpha"] = override_alpha
     if override_l1_ratio is not None:
-        config.setdefault('model', {})['l1_ratio'] = override_l1_ratio
+        config.setdefault("model", {})["l1_ratio"] = override_l1_ratio
+    if universe_override is not None:
+        config["universe_file"] = universe_override
 
-    config_dir = Path(config_path).resolve().parent if Path(config_path).exists() else Path(".")
-    output_dir = config_dir / config.get('output', {}).get('output_dir', 'outputs_elasticnet')
-    output_dir.mkdir(parents=True, exist_ok=True)
+    script_dir = Path(__file__).resolve().parent
 
-    # Resolve relative data_dir
-    data_dir = Path(config.get('data_dir', 'data/'))
+    # Resolve data_dir
+    data_dir = Path(config.get("data_dir", "data/"))
     if not data_dir.is_absolute():
-        config['data_dir'] = str(config_dir / data_dir)
+        config["data_dir"] = str(script_dir / data_dir)
 
-    # Resolve relative output_dir in config
-    config['output']['output_dir'] = str(output_dir)
+    # Create timestamped run directory
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_base = script_dir / config.get("output", {}).get("output_dir", "outputs_elasticnet")
+    run_dir = output_base / f"run_{run_ts}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    config["output"]["output_dir"] = str(run_dir)
 
-    log_file = output_dir / 'training.log'
+    # Also create a 'latest' symlink / copy marker
+    latest_marker = output_base / "latest_run.txt"
+    latest_marker.write_text(str(run_dir))
+
+    log_file = run_dir / "training.log"
     logger = setup_logging(log_file)
 
-    snapshots = snapshots_override or config.get('snapshots', ["20181228", "20191231", "20201231"])
+    snapshots = snapshots_override or config.get("snapshots", ["20181228", "20191231", "20201231"])
+    mp = config.get("model", {})
 
-    logger.info("=" * 70)
-    logger.info("ELASTICNET ROLLING PER-SNAPSHOT TRAINING PIPELINE (v2)")
-    logger.info("=" * 70)
-    logger.info(f"Config:    {config_path}")
-    logger.info(f"Snapshots: {snapshots}")
-    logger.info(f"Output:    {output_dir}")
-    logger.info(f"Timestamp: {datetime.now().isoformat()}")
+    # Save config snapshot
+    with open(run_dir / "config_used.yaml", "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    model_params = config.get('model', {})
-    logger.info(f"Model:     ElasticNet(alpha={model_params.get('alpha')}, "
-                f"l1_ratio={model_params.get('l1_ratio')})")
+    # ─────────────────────────────────────────────────────────────────────
+    #  Header
+    # ─────────────────────────────────────────────────────────────────────
+    log_banner(logger, "ELASTICNET  —  ROLLING PER-SNAPSHOT PIPELINE (v2)")
+    log_kv(logger, "Config", config_path)
+    log_kv(logger, "Run directory", run_dir)
+    log_kv(logger, "Data directory", config["data_dir"])
+    log_kv(logger, "Snapshots", " → ".join(snapshots))
+    log_kv(logger, "Factor keys", ", ".join(config.get("factor_keys", ["0","1","2"])))
+    log_kv(logger, "Alpha", mp.get("alpha"))
+    log_kv(logger, "L1 ratio", mp.get("l1_ratio"))
+    log_kv(logger, "Max iterations", mp.get("max_iter"))
+    log_kv(logger, "Random seed", config.get("training", {}).get("random_seed"))
+    log_kv(logger, "Started at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    if not LMT_API_AVAILABLE:
+        logger.warning("  ⚠ lmt_data_api not installed — API evaluation will be skipped")
 
-    # =========================================================================
-    # Phase 1: Rolling per-snapshot training
-    # =========================================================================
+    # Load universe filter
+    universe_path = config.get("universe_file", "")
+    universe = load_universe(universe_path, logger) if universe_path else None
+    if universe:
+        log_kv(logger, "Universe", f"{len(universe)} instruments from {universe_path}")
+    else:
+        log_kv(logger, "Universe", "all instruments (no filter)")
 
-    all_snapshot_results = []
-    all_oos_predictions = []
+    # ─────────────────────────────────────────────────────────────────────
+    #  Phase 1: Rolling per-snapshot training
+    # ─────────────────────────────────────────────────────────────────────
+    log_banner(logger, "PHASE 1  │  ROLLING PER-SNAPSHOT TRAINING")
 
-    for snapshot in snapshots:
-        result = process_snapshot(snapshot, config, logger)
-        all_snapshot_results.append(result['report'])
-        all_oos_predictions.append(result['pred_ensemble'])
+    all_reports = []
+    all_oos_preds = []
 
-    # =========================================================================
-    # Phase 2: Aggregate all OOS predictions
-    # =========================================================================
+    for i, snapshot in enumerate(snapshots, 1):
+        logger.info(f"\n  ▶ Snapshot {i}/{len(snapshots)}: {snapshot}")
+        result = process_snapshot(snapshot, config, run_dir, logger, universe)
+        all_reports.append(result["report"])
+        all_oos_preds.append(result["pred_ensemble"])
 
-    logger.info("\n" + "=" * 70)
-    logger.info("ROLLING AGGREGATION — ALL SNAPSHOTS")
-    logger.info("=" * 70)
+    # ─────────────────────────────────────────────────────────────────────
+    #  Phase 2: Aggregate all OOS predictions
+    # ─────────────────────────────────────────────────────────────────────
+    log_banner(logger, "PHASE 2  │  AGGREGATE OOS PREDICTIONS")
 
-    combined_oos = pd.concat(all_oos_predictions).sort_index()
-    combined_oos = combined_oos[~combined_oos.index.duplicated(keep='last')]
-    combined_oos.name = 'prediction'
+    combined_oos = pd.concat(all_oos_preds).sort_index()
+    combined_oos = combined_oos[~combined_oos.index.duplicated(keep="last")]
+    combined_oos.name = "prediction"
 
-    dates = combined_oos.index.get_level_values('date')
-    logger.info(f"Combined OOS: {len(combined_oos)} samples, "
-                f"{dates.nunique()} dates ({dates.min()} to {dates.max()})")
+    dates = combined_oos.index.get_level_values("date")
+    log_kv(logger, "Total samples", f"{len(combined_oos):,}")
+    log_kv(logger, "Total dates", dates.nunique())
+    log_kv(logger, "Date range", f"{dates.min()} → {dates.max()}")
 
-    # Save combined predictions
-    combined_oos.to_frame().to_parquet(output_dir / 'pred_ensemble_all.parquet')
+    agg_pred_path = run_dir / "elasticnet_ensemble_all_oos.parquet"
+    combined_oos.to_frame().to_parquet(agg_pred_path)
+    logger.info(f"    Saved → {agg_pred_path.name}")
 
-    # LMT API aggregate evaluation
+    # ── Aggregate CSV ──
+    agg_csv_path = run_dir / "oos_predictions_all.csv"
+    agg_csv = combined_oos.reset_index()
+    agg_csv.columns = ["date", "code", "prediction"]
+    agg_csv = agg_csv.sort_values(["date", "code"])
+    agg_csv.to_csv(agg_csv_path, index=False)
+    logger.info(f"    CSV saved → {agg_csv_path.name}  ({len(agg_csv):,} rows)")
+
+    # Aggregate LMT API
     aggregate_lmt = run_lmt_api_evaluation(
-        combined_oos, logger, config, label="[AGGREGATE]"
+        combined_oos, logger, config, label="AGGREGATE",
+        output_dir=run_dir,
     )
 
-    # =========================================================================
-    # Phase 3: Generate rolling report
-    # =========================================================================
+    # ─────────────────────────────────────────────────────────────────────
+    #  Phase 3: Report
+    # ─────────────────────────────────────────────────────────────────────
+    log_banner(logger, "PHASE 3  │  SUMMARY")
 
     rolling_report = {
-        'pipeline': 'ElasticNet Rolling Per-Snapshot (v2)',
-        'timestamp': datetime.now().isoformat(),
-        'config': config,
-        'snapshots_processed': snapshots,
-        'per_snapshot_results': all_snapshot_results,
-        'aggregate': {
-            'n_samples': len(combined_oos),
-            'n_dates': int(dates.nunique()),
-            'date_range': [int(dates.min()), int(dates.max())],
-            'lmt_api_results': aggregate_lmt
-        }
+        "pipeline": "ElasticNet Rolling Per-Snapshot (v2)",
+        "run_directory": str(run_dir),
+        "timestamp": datetime.now().isoformat(),
+        "config": config,
+        "snapshots_processed": snapshots,
+        "per_snapshot": all_reports,
+        "aggregate": {
+            "n_samples": len(combined_oos),
+            "n_dates": int(dates.nunique()),
+            "date_range": [int(dates.min()), int(dates.max())],
+            "prediction_file": str(agg_pred_path),
+            "lmt_api": aggregate_lmt,
+        },
     }
 
-    with open(output_dir / 'rolling_report.json', 'w') as f:
+    report_path = run_dir / "rolling_report.json"
+    with open(report_path, "w") as f:
         json.dump(rolling_report, f, indent=2, default=str)
 
-    # =========================================================================
-    # Summary
-    # =========================================================================
+    # ── Pretty summary table ──
+    logger.info("")
+    hdr = (f"  {'Snapshot':>10s}  │  {'OOS Range':>21s}  │  "
+           f"{'Days':>5s}  │  {'Samples':>9s}  │  "
+           f"{'IC(k0)':>7s}  {'IC(k1)':>7s}  {'IC(k2)':>7s}  │  "
+           f"{'Sparsity(k0)':>12s}")
+    logger.info(hdr)
+    logger.info("  " + "─" * len(hdr.strip()))
 
-    logger.info("\n" + "=" * 70)
-    logger.info("PIPELINE COMPLETE")
-    logger.info("=" * 70)
-    logger.info(f"Output directory: {output_dir}")
+    for rpt in all_reports:
+        snap = rpt["snapshot"]
+        dr = rpt.get("oos_date_range", ["?", "?"])
+        nd = rpt.get("oos_n_dates", "?")
+        ns = rpt.get("oos_n_samples", "?")
+        keys = config.get("factor_keys", ["0", "1", "2"])
+        ics = []
+        for k in keys:
+            m = rpt.get("metrics_by_key", {}).get(k, {})
+            ics.append(f"{m.get('ic', 0):+.4f}")
+        sp0 = rpt.get("coefficient_analysis", {}).get("0", {}).get("sparsity", 0)
+        logger.info(
+            f"  {snap:>10s}  │  {dr[0]} → {dr[1]}  │  "
+            f"{nd:>5}  │  {ns:>9,}  │  "
+            f"{'  '.join(ics)}  │  {sp0:>11.1%}"
+        )
 
-    print("\n" + "=" * 70)
-    print("ROLLING TRAINING SUMMARY")
-    print("=" * 70)
-    print(f"Model: ElasticNet(alpha={model_params.get('alpha')}, l1_ratio={model_params.get('l1_ratio')})")
+    logger.info("")
+    log_kv(logger, "Run directory", run_dir)
+    log_kv(logger, "Report", report_path.name)
+    log_kv(logger, "All-OOS predictions", agg_pred_path.name)
+    log_kv(logger, "Training log", log_file.name)
 
-    for report in all_snapshot_results:
-        snapshot = report['snapshot']
-        oos_range = report.get('oos_date_range', ['?', '?'])
-        print(f"\n📊 Snapshot {snapshot} (OOS: {oos_range[0]} → {oos_range[1]})")
-        for key in config.get('factor_keys', ['0', '1', '2']):
-            if key in report.get('metrics_by_key', {}):
-                m = report['metrics_by_key'][key]
-                c = report.get('coefficient_analyses', {}).get(key, {})
-                sparsity = c.get('sparsity', 0)
-                print(f"   Key {key}: IC={m['ic']:.4f}  R²={m['r2']:.6f}  "
-                      f"RMSE={m['rmse']:.6f}  Sparsity={sparsity:.1%}")
+    # ── Console summary ──
+    end_time = datetime.now()
+    log_banner(logger, "PIPELINE COMPLETE")
+    log_kv(logger, "Duration", str(end_time - datetime.fromisoformat(rolling_report["timestamp"]).replace(microsecond=0)))
+    log_kv(logger, "Artifacts", f"{len(list(run_dir.rglob('*')))} files in {run_dir}")
+    logger.info("")
 
-    print(f"\n📈 Aggregate OOS: {len(combined_oos)} samples, {dates.nunique()} dates")
-    print(f"   Date range: {dates.min()} → {dates.max()}")
-    print("=" * 70)
+    # Tree view of outputs
+    logger.info("  Output structure:")
+    for p in sorted(run_dir.rglob("*")):
+        if p.is_file():
+            rel = p.relative_to(run_dir)
+            size_kb = p.stat().st_size / 1024
+            if size_kb > 1024:
+                size_str = f"{size_kb/1024:.1f} MB"
+            else:
+                size_str = f"{size_kb:.0f} KB"
+            logger.info(f"    {str(rel):<55s} {size_str:>10s}")
 
     return rolling_report
 
@@ -633,7 +755,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="ElasticNet rolling per-snapshot training & evaluation (v2)"
     )
-    parser.add_argument("--config", type=str, default="config_elasticnet.yaml",
+    parser.add_argument("--config", type=str, default="configs/elasticnet.yaml",
                         help="Config YAML file")
     parser.add_argument("--alpha", type=float, default=None,
                         help="Override alpha")
@@ -641,5 +763,7 @@ if __name__ == "__main__":
                         help="Override l1_ratio")
     parser.add_argument("--snapshots", nargs="+", default=None,
                         help="Override snapshot list")
+    parser.add_argument("--universe", type=str, default=None,
+                        help="Path to universe.txt (one code per line)")
     args = parser.parse_args()
-    main(args.config, args.alpha, args.l1_ratio, args.snapshots)
+    main(args.config, args.alpha, args.l1_ratio, args.snapshots, args.universe)
