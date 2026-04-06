@@ -1,9 +1,6 @@
 """
 Data Structure Inspector — Diagnose column/index types for Parquet compatibility.
 
-Run this on the machine with the actual data files.
-Paste the output back so we can fix the export script.
-
 Usage:
     python inspect_data.py
 """

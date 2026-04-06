@@ -142,7 +142,11 @@ def prepare_cs_data(
     dates = X.index.get_level_values("date").unique().sort_values()
     n_dates = len(dates)
     val_start = int(n_dates * (1 - val_ratio))
-    train_dates = dates[:val_start]
+    # Gap buffer: skip label_period days between train and val to
+    # prevent forward-return overlap (data leakage)
+    label_period = config.get("evaluation", {}).get("label_period", 10)
+    train_end = max(0, val_start - label_period)
+    train_dates = dates[:train_end]
     val_dates = dates[val_start:]
 
     train_mask = X.index.get_level_values("date").isin(train_dates)
@@ -153,6 +157,7 @@ def prepare_cs_data(
 
     logger.info(f"    Train: {len(X_train):>8,} samples  ({len(train_dates)} dates)")
     logger.info(f"    Val:   {len(X_val):>8,} samples  ({len(val_dates)} dates)")
+    logger.info(f"    Gap:   {label_period} days dropped between train/val")
 
     # Scale (fit on train)
     scaler = StandardScaler()

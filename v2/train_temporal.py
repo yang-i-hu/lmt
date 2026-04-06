@@ -147,11 +147,15 @@ def prepare_temporal_data(
     dates = X.index.get_level_values("date").unique().sort_values()
     n_dates = len(dates)
     val_start = int(n_dates * (1 - val_ratio))
+    # Gap buffer: skip label_period days between train and val to
+    # prevent forward-return overlap (data leakage)
+    label_period = config.get("evaluation", {}).get("label_period", 10)
+    train_end = max(0, val_start - label_period)
     # Ensure validation has history: push train/val boundary back by window_size
     # so val instruments can have windows from the val portion
     history_start = max(0, val_start - window_size)
 
-    train_dates = dates[:val_start]
+    train_dates = dates[:train_end]
     val_dates = dates[history_start:]  # includes overlap for history context
 
     train_mask = X.index.get_level_values("date").isin(train_dates)
@@ -179,6 +183,7 @@ def prepare_temporal_data(
                 f"({len(train_dates)} dates, W={window_size})")
     logger.info(f"    Val:   {len(val_ds):>8,} windows  "
                 f"(with {window_size} overlap dates for history)")
+    logger.info(f"    Gap:   {label_period} days dropped between train/val")
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)

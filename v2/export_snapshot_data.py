@@ -267,7 +267,12 @@ def export_snapshot(
             oos_mask = (dates > cutoff_date) & (dates <= oos_end_date)
 
             if is_mask.sum() > 0:
-                is_chunks.append(aligned[is_mask])
+                is_data = aligned[is_mask]
+                # Prevent data leakage: exclude IS rows whose forward
+                # return window (endDate) extends past the cutoff date
+                is_data = is_data[is_data["endDate"] <= cutoff_date]
+                if len(is_data) > 0:
+                    is_chunks.append(is_data)
             if oos_mask.sum() > 0:
                 oos_chunks.append(aligned[oos_mask])
 

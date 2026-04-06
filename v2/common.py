@@ -408,7 +408,11 @@ def prepare_tabular_data(
     dates = X.index.get_level_values("date").unique().sort_values()
     n_dates = len(dates)
     val_start = int(n_dates * (1 - val_ratio))
-    train_dates = dates[:val_start]
+    # Gap buffer: skip label_period days between train and val to
+    # prevent forward-return overlap (data leakage)
+    label_period = config.get("evaluation", {}).get("label_period", 10)
+    train_end = max(0, val_start - label_period)
+    train_dates = dates[:train_end]
     val_dates = dates[val_start:]
 
     train_mask = X.index.get_level_values("date").isin(train_dates)
@@ -419,6 +423,7 @@ def prepare_tabular_data(
 
     logger.info(f"    Train split: {len(X_train):>8,} samples ({len(train_dates)} days)")
     logger.info(f"    Val   split: {len(X_val):>8,} samples ({len(val_dates)} days)")
+    logger.info(f"    Gap buffer:  {label_period} days dropped between train/val")
 
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train.values)
@@ -506,7 +511,12 @@ def train_tabular_model(
             for X_b, y_b in val_loader:
                 X_b, y_b = X_b.to(device), y_b.to(device)
                 pred = model(X_b)
-                val_loss += criterion(pred, y_b).item()
+                # Use same loss formulation as training so the two
+                # columns are comparable and early-stopping is meaningful
+                if has_custom_loss:
+                    val_loss += model.compute_loss(X_b, y_b, criterion).item()
+                else:
+                    val_loss += criterion(pred, y_b).item()
                 all_preds.extend(pred.cpu().numpy())
                 all_targets.extend(y_b.cpu().numpy())
         val_loss /= len(val_loader)
