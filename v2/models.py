@@ -12,6 +12,7 @@ Models
 4. FactorTransformer           – Self-attention over factors (each factor = token)
 5. CrossSectionalTransformer   – Attention across stocks within each date
 6. TemporalTransformer         – Temporal attention over factor history per stock
+7. SuperEncoder                – Autoencoder + cross-sectional attention on latent space
 """
 
 import math
@@ -507,3 +508,186 @@ class TemporalTransformer(nn.Module):
             rep = h.mean(dim=1)
 
         return self.head(rep).squeeze(-1)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 7. SuperEncoder  (autoencoder + cross-sectional attention on latent)
+# ═════════════════════════════════════════════════════════════════════════
+
+class SuperEncoder(nn.Module):
+    """Autoencoder with cross-sectional attention on the latent space.
+
+    Combines the best of both worlds:
+      - **Autoencoder bottleneck** compresses ~1000 collinear factors into a
+        compact latent (e.g. 64-dim), providing strong regularisation.
+      - **Cross-sectional transformer** applies multi-head self-attention
+        across all stocks on the same date *in the latent space*, learning
+        relative mispricing, sector structure, and crowding effects cheaply
+        (O(N_stocks² × latent_dim)  instead of  O(N_stocks² × n_factors)).
+
+    Architecture::
+
+        Per-stock:   Input (F) → ResidualEncoder → latent_z  (64-dim)
+        Per-date:    All latent_z → TransformerEncoder → enhanced_z
+        Per-stock:   enhanced_z → Predictor → prediction
+                     latent_z   → Decoder   → reconstruction (regulariser)
+
+    Reconstruction is computed from the *pre-attention* latent so the
+    encoder must learn a good factor representation on its own.
+
+    Input:  (B_dates, N_stocks, n_factors)  with bool padding mask
+    Output: (B_dates, N_stocks)
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        encoder_sizes: List[int] = None,
+        latent_dim: int = 64,
+        predictor_sizes: List[int] = None,
+        dropout: float = 0.3,
+        recon_weight: float = 0.1,
+        use_residual: bool = True,
+        # cross-sectional transformer params
+        cs_n_heads: int = 4,
+        cs_n_layers: int = 2,
+        cs_dim_feedforward: int = 256,
+    ):
+        super().__init__()
+        if encoder_sizes is None:
+            encoder_sizes = [512, 256]
+        if predictor_sizes is None:
+            predictor_sizes = [128]
+
+        self.input_size = input_size
+        self.latent_dim = latent_dim
+        self.recon_weight = recon_weight
+        self.use_residual = use_residual
+
+        # ── Encoder (per-stock) ──
+        enc: list[nn.Module] = []
+        prev = input_size
+        for h in encoder_sizes:
+            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU(), nn.Dropout(dropout)])
+            if use_residual and prev == h:
+                # wrap the last 4 layers as a residual block
+                enc[-4:] = [_ResidualBlock(h, dropout)]
+            prev = h
+        enc.append(nn.Linear(prev, latent_dim))
+        self.encoder = nn.Sequential(*enc)
+
+        # ── Decoder (for reconstruction loss, mirrors encoder) ──
+        dec: list[nn.Module] = []
+        prev = latent_dim
+        for h in reversed(encoder_sizes):
+            dec.extend([nn.Linear(prev, h), nn.GELU()])
+            prev = h
+        dec.append(nn.Linear(prev, input_size))
+        self.decoder = nn.Sequential(*dec)
+
+        # ── Cross-Sectional Transformer (on latent space) ──
+        self.cs_norm = nn.LayerNorm(latent_dim)
+        cs_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim,
+            nhead=cs_n_heads,
+            dim_feedforward=cs_dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.cs_transformer = nn.TransformerEncoder(cs_layer, num_layers=cs_n_layers)
+
+        # ── Predictor head (per-stock, on enhanced latent) ──
+        pred: list[nn.Module] = []
+        prev = latent_dim
+        for h in predictor_sizes:
+            pred.extend([nn.Linear(prev, h), nn.GELU(), nn.Dropout(dropout)])
+            prev = h
+        pred.append(nn.Linear(prev, 1))
+        self.predictor = nn.Sequential(*pred)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    # ── helpers ──
+
+    def _encode_flat(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Encode a flat batch of samples: (N, F) → (N, latent_dim)."""
+        return self.encoder(x_flat)
+
+    def _decode_flat(self, z_flat: torch.Tensor) -> torch.Tensor:
+        """Decode a flat batch: (N, latent_dim) → (N, F)."""
+        return self.decoder(z_flat)
+
+    # ── forward (cross-sectional batching) ──
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        """
+        x:    (B, N_stocks, n_factors)
+        mask: (B, N_stocks)  True = valid stock, False = padding
+        Returns: (B, N_stocks) predictions
+        """
+        B, N, F = x.shape
+
+        # 1. Per-stock encoding  (flatten → encode → reshape)
+        x_flat = x.reshape(B * N, F)                              # (B*N, F)
+        z_flat = self._encode_flat(x_flat)                         # (B*N, latent)
+        z = z_flat.reshape(B, N, self.latent_dim)                  # (B, N, latent)
+
+        # 2. Cross-sectional attention on latent representations
+        z_normed = self.cs_norm(z)
+        pad_mask = (~mask) if mask is not None else None
+        h = self.cs_transformer(z_normed, src_key_padding_mask=pad_mask)  # (B, N, latent)
+
+        # Residual: enhanced = attention_output + original latent
+        enhanced = h + z
+
+        # 3. Per-stock prediction  (flatten → predict → reshape)
+        enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
+        pred = self.predictor(enhanced_flat).squeeze(-1)           # (B*N,)
+        return pred.reshape(B, N)                                  # (B, N)
+
+    def compute_loss(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask: torch.Tensor,
+        criterion: nn.Module,
+    ) -> torch.Tensor:
+        """Combined prediction + reconstruction loss (masked).
+
+        x:    (B, N_stocks, n_factors)
+        y:    (B, N_stocks)
+        mask: (B, N_stocks)  True = valid
+        """
+        B, N, F = x.shape
+
+        # 1. Encode
+        x_flat = x.reshape(B * N, F)
+        z_flat = self._encode_flat(x_flat)
+        z = z_flat.reshape(B, N, self.latent_dim)
+
+        # 2. Cross-sectional attention + residual
+        z_normed = self.cs_norm(z)
+        pad_mask = (~mask) if mask is not None else None
+        h = self.cs_transformer(z_normed, src_key_padding_mask=pad_mask)
+        enhanced = h + z
+
+        # 3. Prediction loss (only valid stocks)
+        enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
+        pred = self.predictor(enhanced_flat).squeeze(-1).reshape(B, N)
+        pred_loss = criterion(pred[mask], y[mask])
+
+        # 4. Reconstruction loss (from pre-attention latent, valid stocks only)
+        if self.recon_weight > 0:
+            x_recon = self._decode_flat(z_flat).reshape(B, N, F)
+            recon_loss = F.mse_loss(x_recon[mask], x[mask])
+            return pred_loss + self.recon_weight * recon_loss
+
+        return pred_loss

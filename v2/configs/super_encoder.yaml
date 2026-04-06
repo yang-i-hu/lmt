@@ -1,0 +1,59 @@
+# =============================================================================
+# SuperEncoder — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Use with: python train_super_encoder.py --config configs/super_encoder.yaml
+#
+# Combines autoencoder factor compression (bottleneck) with cross-sectional
+# self-attention on the latent space.  Factors are compressed per-stock,
+# then all stocks on the same date attend to each other in that compact
+# latent space before per-stock prediction.
+#
+# ⚠ Each "sample" is one date (all stocks).  batch_size refers to number
+#   of dates per gradient step, not individual stock-date rows.
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  # ── Autoencoder ──
+  encoder_sizes: [512, 256]     # Hidden layers before bottleneck
+  latent_dim: 64                # Bottleneck dimension
+  predictor_sizes: [128]        # Prediction head hidden layers
+  dropout: 0.3
+  recon_weight: 0.1             # Reconstruction loss weight (0 = disable)
+  use_residual: true            # Residual connections in encoder (where dims match)
+
+  # ── Cross-Sectional Transformer (on latent space) ──
+  cs_n_heads: 4                 # Attention heads (latent_dim must be divisible)
+  cs_n_layers: 2                # Transformer layers
+  cs_dim_feedforward: 256       # FFN hidden dim inside transformer
+
+training:
+  epochs: 100
+  batch_size: 4                 # Number of dates per batch
+  learning_rate: 0.00005        # Lower LR for transformer components
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_super_encoder"
