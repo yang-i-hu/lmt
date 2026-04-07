@@ -1,0 +1,66 @@
+# =============================================================================
+# TransXGB — Rolling Per-Snapshot Configuration (v2)
+# =============================================================================
+# Transformer backbone + XGBoost residual refinement.
+# Stage 1: Train Transformer on raw factors (self-attention over factors).
+# Stage 2: Train XGBoost on residuals using original features + transformer latent.
+#
+# Use with: python train_transxgb.py --config configs/transxgb.yaml
+
+data_dir: "data/"
+
+snapshots:
+  - "20181228"
+  - "20191231"
+  - "20201231"
+
+snapshot_oos_end:
+  "20181228": 20191231
+  "20191231": 20201231
+  "20201231": 20211231
+
+universe_file: ""
+
+factor_keys: ["0", "1", "2"]
+
+model:
+  # -- Transformer backbone --
+  d_model: 64
+  n_heads: 4
+  n_layers: 2
+  dim_feedforward: 128
+  dropout: 0.3
+  pool: "cls"                   # "cls" or "mean"
+  gradient_checkpointing: true
+
+  # -- XGBoost residual stage --
+  xgb_features: "both"          # "original", "latent", or "both"
+  xgb_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1               # L1 regularization
+    reg_lambda: 1.0              # L2 regularization
+    min_child_weight: 10
+    early_stopping_rounds: 50
+    tree_method: "hist"          # fast histogram-based
+    random_state: 42
+
+training:
+  epochs: 100
+  batch_size: 128
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stopping_patience: 15
+  val_ratio: 0.15
+  random_seed: 42
+
+evaluation:
+  label_period: 10
+  alpha: 1
+
+output:
+  output_dir: "outputs_transxgb"

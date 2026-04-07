@@ -13,6 +13,7 @@ pyarrow>=8.0.0
 scikit-learn>=1.0.0
 scipy>=1.7.0
 torch>=1.10.0
+xgboost>=1.6.0
 
 # Utilities
 pyyaml>=5.4.0

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(grep -n \"def.*load\\\\|def.*get.*model\\\\|class.*Registry\\\\|MODEL.*=\\\\|models\\\\[\" /d/projects/lmt/v2/*.py)"
+    ]
+  }
+}

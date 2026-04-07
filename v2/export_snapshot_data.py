@@ -388,7 +388,7 @@ def main(
             label_file,
             cutoff_date=cutoff_date,
             oos_end_date=oos_end_date,
-            start_date=20180101,
+            start_date=None,
         )
 
         if labels_indexed.empty:

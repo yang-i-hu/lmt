@@ -10,9 +10,10 @@ Models
 2. ResidualMLP                 – ResNet-style residual blocks
 3. FactorAutoencoder           – Encoder → latent → predictor (+ optional recon)
 4. FactorTransformer           – Self-attention over factors (each factor = token)
-5. CrossSectionalTransformer   – Attention across stocks within each date
-6. TemporalTransformer         – Temporal attention over factor history per stock
-7. SuperEncoder                – Autoencoder + cross-sectional attention on latent space
+5. TransXGBTransformer         – Transformer backbone for TransXGB two-stage model
+6. CrossSectionalTransformer   – Attention across stocks within each date
+7. TemporalTransformer         – Temporal attention over factor history per stock
+8. SuperEncoder                – Autoencoder + cross-sectional attention on latent space
 """
 
 import math
@@ -338,7 +339,134 @@ class FactorTransformer(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 5. Cross-Sectional Transformer  (attention across stocks)
+# 5. TransXGB Transformer  (backbone for Transformer + XGBoost stacking)
+# ═════════════════════════════════════════════════════════════════════════
+
+class TransXGBTransformer(nn.Module):
+    """Transformer backbone for the TransXGB two-stage model.
+
+    Architecture:
+        factor values → value_proj + factor_embed → Transformer Encoder →
+        CLS / mean pool → latent (d_model) → MLP head → prediction
+
+    Same self-attention-over-factors design as FactorTransformer, but
+    additionally exposes ``encode()`` and ``forward_with_latent()`` so the
+    downstream XGBoost stage can access the pooled latent representation.
+
+    Stage 1 (this module): trained via the standard tabular pipeline.
+    Stage 2 (external):    XGBoost fitted on residuals using original
+                           features + latent embeddings from this module.
+
+    Input:  (B, n_factors)
+    Output: (B,)
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        d_model: int = 64,
+        n_heads: int = 4,
+        n_layers: int = 2,
+        dim_feedforward: int = 128,
+        dropout: float = 0.3,
+        pool: str = "cls",
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.d_model = d_model
+        self.pool = pool
+
+        # Project each scalar factor value to d_model
+        self.value_proj = nn.Linear(1, d_model)
+
+        # Learned factor position embeddings
+        self.factor_embed = nn.Parameter(torch.randn(1, input_size, d_model) * 0.02)
+
+        # CLS token
+        if pool == "cls":
+            self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_layers,
+            enable_nested_tensor=False,
+        )
+
+        # Prediction head
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def enable_gradient_checkpointing(self):
+        """Trade compute for memory — re-compute activations during backward."""
+        self._use_checkpoint = True
+
+    def _transformer_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared path: project → embed → transformer → pool → latent (B, d_model)."""
+        B = x.size(0)
+        values = x.unsqueeze(-1)                               # (B, n_factors, 1)
+        tokens = self.value_proj(values) + self.factor_embed   # (B, n_factors, d_model)
+
+        if self.pool == "cls":
+            cls = self.cls_token.expand(B, -1, -1)
+            tokens = torch.cat([cls, tokens], dim=1)
+
+        if getattr(self, "_use_checkpoint", False):
+            for layer in self.transformer.layers:
+                tokens = torch.utils.checkpoint.checkpoint(layer, tokens, use_reentrant=False)
+            h = tokens
+        else:
+            h = self.transformer(tokens)
+
+        if self.pool == "cls":
+            return h[:, 0, :]
+        return h.mean(dim=1)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Return pooled latent representation (B, d_model) without prediction head."""
+        return self._transformer_forward(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard prediction: (B, n_factors) → (B,)."""
+        rep = self._transformer_forward(x)
+        return self.head(rep).squeeze(-1)
+
+    def forward_with_latent(self, x: torch.Tensor):
+        """Return both prediction and latent in a single pass.
+
+        Returns
+        -------
+        pred : Tensor (B,)
+        latent : Tensor (B, d_model)
+        """
+        rep = self._transformer_forward(x)
+        pred = self.head(rep).squeeze(-1)
+        return pred, rep
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# 6. Cross-Sectional Transformer  (attention across stocks)
 # ═════════════════════════════════════════════════════════════════════════
 
 class CrossSectionalTransformer(nn.Module):
@@ -411,7 +539,7 @@ class CrossSectionalTransformer(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 6. Temporal Transformer  (attention over time per stock)
+# 7. Temporal Transformer  (attention over time per stock)
 # ═════════════════════════════════════════════════════════════════════════
 
 class _SinusoidalPE(nn.Module):
@@ -511,7 +639,7 @@ class TemporalTransformer(nn.Module):
 
 
 # ═════════════════════════════════════════════════════════════════════════
-# 7. SuperEncoder  (autoencoder + cross-sectional attention on latent)
+# 8. SuperEncoder  (autoencoder + cross-sectional attention on latent)
 # ═════════════════════════════════════════════════════════════════════════
 
 class _ResidualBlockLN(nn.Module):
