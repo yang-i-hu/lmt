@@ -29,25 +29,28 @@ factor_keys: ["0", "1", "2"]
 
 model:
   # ── Autoencoder ──
-  encoder_sizes: [512, 256]     # Hidden layers before bottleneck
-  latent_dim: 64                # Bottleneck dimension
-  predictor_sizes: [128]        # Prediction head hidden layers
-  dropout: 0.3
+  encoder_sizes: [1024, 512]    # Wider encoder for richer factor interactions
+  latent_dim: 128               # Richer latent for cross-sectional attention (128/8=16 per head)
+  predictor_sizes: [256, 128]   # Deeper prediction head
+  dropout: 0.25                 # Slightly less dropout — bigger model benefits from seeing more
   recon_weight: 0.1             # Reconstruction loss weight (0 = disable)
   use_residual: true            # Residual connections in encoder (where dims match)
+  ic_loss_weight: 1.0           # IC consistency loss: -mean(IC) + std(IC), directly optimises ICIR
 
   # ── Cross-Sectional Transformer (on latent space) ──
-  cs_n_heads: 4                 # Attention heads (latent_dim must be divisible)
-  cs_n_layers: 2                # Transformer layers
-  cs_dim_feedforward: 256       # FFN hidden dim inside transformer
+  cs_n_heads: 8                 # Attention heads (latent_dim must be divisible)
+  cs_n_layers: 2                # Fewer layers = less regime overfitting
+  cs_dim_feedforward: 512       # Wider FFN inside transformer
+  cs_dropout: 0.4               # Higher dropout for CS attention (stabilises ICIR)
 
 training:
-  epochs: 100
-  batch_size: 4                 # Number of dates per batch
-  learning_rate: 0.00005        # Lower LR for transformer components
+  epochs: 150                   # More epochs — bigger model needs longer to converge
+  batch_size: 6                 # More dates per gradient step (~17GB estimated)
+  learning_rate: 0.00008        # Slightly higher for larger batch (√(6/4) scaling)
   weight_decay: 0.01
-  warmup_epochs: 10
-  early_stopping_patience: 15
+  warmup_epochs: 15             # Longer warmup for bigger model
+  early_stopping_patience: 25   # More patience — gated model trains slower
+  early_stopping_metric: "icir" # Stop on best ICIR, not best val_loss
   val_ratio: 0.15
   random_seed: 42
 

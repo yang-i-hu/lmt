@@ -59,9 +59,11 @@ DEFAULT_CONFIG = {
         "dropout": 0.3,
         "recon_weight": 0.1,
         "use_residual": True,
+        "ic_loss_weight": 1.0,
         "cs_n_heads": 4,
         "cs_n_layers": 2,
         "cs_dim_feedforward": 256,
+        "cs_dropout": None,
     },
     "training": {
         "epochs": 100,
@@ -69,6 +71,7 @@ DEFAULT_CONFIG = {
         "weight_decay": 0.01,
         "warmup_epochs": 10,
         "early_stopping_patience": 15,
+        "early_stopping_metric": "icir",
         "val_ratio": 0.15,
         "random_seed": 42,
     },
@@ -202,13 +205,14 @@ def train_model(
     device: torch.device,
     logger,
 ) -> Dict[str, list]:
-    """Training loop for SuperEncoder with dual loss."""
+    """Training loop for SuperEncoder with IC-aware loss and ICIR-based early stopping."""
     tp = config.get("training", {})
     epochs = tp.get("epochs", 100)
     lr = tp.get("learning_rate", 0.00005)
     wd = tp.get("weight_decay", 0.01)
     patience = tp.get("early_stopping_patience", 15)
     warmup_epochs = tp.get("warmup_epochs", 10)
+    es_metric = tp.get("early_stopping_metric", "icir")  # "icir" or "val_loss"
 
     criterion = nn.MSELoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
@@ -225,11 +229,12 @@ def train_model(
     )
     early_stopping = EarlyStopping(patience=patience)
 
-    history = {"train_loss": [], "val_loss": [], "val_ic": []}
+    history = {"train_loss": [], "val_loss": [], "val_ic": [], "val_icir": []}
 
+    logger.info(f"    Early stopping on: {es_metric}")
     logger.info(f"    {'Epoch':>6s}  │  {'Train Loss':>10s}  │  "
-                f"{'Val Loss':>10s}  │  {'Val IC':>8s}  │  {'LR':>10s}")
-    logger.info(f"    {'─'*6}──┼──{'─'*10}──┼──{'─'*10}──┼──{'─'*8}──┼──{'─'*10}")
+                f"{'Val Loss':>10s}  │  {'Val IC':>8s}  │  {'Val ICIR':>8s}  │  {'LR':>10s}")
+    logger.info(f"    {'─'*6}──┼──{'─'*10}──┼──{'─'*10}──┼──{'─'*8}──┼──{'─'*8}──┼──{'─'*10}")
 
     for epoch in range(epochs):
         # ── Train ──
@@ -249,10 +254,10 @@ def train_model(
             train_n += mask_b.sum().item()
         train_loss = train_loss_sum / max(train_n, 1)
 
-        # ── Validate ──
+        # ── Validate (per-date IC tracking) ──
         model.eval()
         val_loss_sum, val_n = 0.0, 0
-        all_preds, all_targets = [], []
+        date_preds = {}   # date_idx → (preds, targets)
         with torch.no_grad():
             for x_b, y_b, mask_b, ns in val_loader:
                 x_b = x_b.to(device)
@@ -262,14 +267,32 @@ def train_model(
                 val_loss_sum += loss.item() * mask_b.sum().item()
                 val_n += mask_b.sum().item()
                 pred = model(x_b, mask_b)
-                all_preds.extend(pred[mask_b].cpu().numpy())
-                all_targets.extend(y_b[mask_b].cpu().numpy())
+                # Collect per-date predictions for ICIR
+                for b in range(x_b.size(0)):
+                    valid = mask_b[b]
+                    if valid.sum() < 20:
+                        continue
+                    p = pred[b][valid].cpu().numpy()
+                    t = y_b[b][valid].cpu().numpy()
+                    # Use a unique key per date within the epoch
+                    d_key = len(date_preds)
+                    date_preds[d_key] = (p, t)
         val_loss = val_loss_sum / max(val_n, 1)
 
-        val_ic = float(stats.spearmanr(all_targets, all_preds)[0])
+        # Compute per-date Spearman ICs → ICIR
+        date_ics = []
+        for (p, t) in date_preds.values():
+            ic = float(stats.spearmanr(t, p)[0])
+            if not np.isnan(ic):
+                date_ics.append(ic)
+        date_ics = np.array(date_ics) if date_ics else np.array([0.0])
+        val_ic = float(date_ics.mean())
+        val_icir = float(date_ics.mean() / (date_ics.std() + 1e-8)) if len(date_ics) >= 2 else 0.0
+
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["val_ic"].append(val_ic)
+        history["val_icir"].append(val_icir)
 
         scheduler.step()
         cur_lr = optimizer.param_groups[0]["lr"]
@@ -277,25 +300,36 @@ def train_model(
         if epoch % 10 == 0 or epoch == epochs - 1:
             logger.info(
                 f"    {epoch+1:4d}/{epochs}  │  {train_loss:10.6f}  │  "
-                f"{val_loss:10.6f}  │  {val_ic:+7.4f}  │  {cur_lr:10.2e}"
+                f"{val_loss:10.6f}  │  {val_ic:+7.4f}  │  {val_icir:+7.4f}  │  {cur_lr:10.2e}"
             )
 
-        if early_stopping(val_loss, model):
+        # Early stopping: use -ICIR (lower=better) or val_loss
+        es_score = -val_icir if es_metric == "icir" else val_loss
+        if early_stopping(es_score, model):
             logger.info(
                 f"    {epoch+1:4d}/{epochs}  │  {train_loss:10.6f}  │  "
-                f"{val_loss:10.6f}  │  {val_ic:+7.4f}  │  early stop"
+                f"{val_loss:10.6f}  │  {val_ic:+7.4f}  │  {val_icir:+7.4f}  │  early stop"
             )
             early_stopping.load_best_model(model)
-            logger.info(f"    ⤷ Restored best (val_loss={early_stopping.best_score:.6f})")
+            if es_metric == "icir":
+                logger.info(f"    ⤷ Restored best (val_icir={-early_stopping.best_score:.4f})")
+            else:
+                logger.info(f"    ⤷ Restored best (val_loss={early_stopping.best_score:.6f})")
             break
 
     if not early_stopping.early_stop:
         early_stopping.load_best_model(model)
 
-    best_epoch = int(np.argmin(history["val_loss"])) + 1
+    if es_metric == "icir":
+        best_epoch = int(np.argmax(history["val_icir"])) + 1
+    else:
+        best_epoch = int(np.argmin(history["val_loss"])) + 1
     best_ic = history["val_ic"][best_epoch - 1]
+    best_icir = history["val_icir"][best_epoch - 1]
+    gate_val = torch.sigmoid(model.cs_gate).item()
     logger.info(f"    Best epoch: {best_epoch}  │  "
-                f"val_loss {early_stopping.best_score:.6f}  │  val_ic {best_ic:+.4f}")
+                f"val_ic {best_ic:+.4f}  │  val_icir {best_icir:+.4f}  │  "
+                f"cs_gate {gate_val:.4f}")
     return history
 
 
@@ -414,9 +448,11 @@ def process_snapshot(
             dropout=mc.get("dropout", 0.3),
             recon_weight=mc.get("recon_weight", 0.1),
             use_residual=mc.get("use_residual", True),
+            ic_loss_weight=mc.get("ic_loss_weight", 0.0),
             cs_n_heads=mc.get("cs_n_heads", 4),
             cs_n_layers=mc.get("cs_n_layers", 2),
             cs_dim_feedforward=mc.get("cs_dim_feedforward", 256),
+            cs_dropout=mc.get("cs_dropout", None),
         ).to(device)
         logger.info(f"    Model: {count_parameters(model):,} params  │  "
                     f"max_stocks={max_stocks}  │  device={device}")

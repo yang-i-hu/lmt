@@ -548,10 +548,12 @@ class SuperEncoder(nn.Module):
         dropout: float = 0.3,
         recon_weight: float = 0.1,
         use_residual: bool = True,
+        ic_loss_weight: float = 0.0,  # weight for IC consistency loss (0 = disabled)
         # cross-sectional transformer params
         cs_n_heads: int = 4,
         cs_n_layers: int = 2,
         cs_dim_feedforward: int = 256,
+        cs_dropout: float = None,     # separate dropout for CS attention (default: same as dropout)
     ):
         super().__init__()
         if encoder_sizes is None:
@@ -562,6 +564,7 @@ class SuperEncoder(nn.Module):
         self.input_size = input_size
         self.latent_dim = latent_dim
         self.recon_weight = recon_weight
+        self.ic_loss_weight = ic_loss_weight
         self.use_residual = use_residual
 
         # ── Encoder (per-stock) ──
@@ -587,15 +590,21 @@ class SuperEncoder(nn.Module):
 
         # ── Cross-Sectional Transformer (on latent space) ──
         self.cs_norm = nn.LayerNorm(latent_dim)
+        cs_drop = cs_dropout if cs_dropout is not None else dropout
         cs_layer = nn.TransformerEncoderLayer(
             d_model=latent_dim,
             nhead=cs_n_heads,
             dim_feedforward=cs_dim_feedforward,
-            dropout=dropout,
+            dropout=cs_drop,
             activation="gelu",
             batch_first=True,
         )
         self.cs_transformer = nn.TransformerEncoder(cs_layer, num_layers=cs_n_layers)
+
+        # Learnable gate controlling cross-sectional contribution.
+        # Initialised to 0.1 so the model starts mostly as a plain
+        # autoencoder and must learn to trust the CS signal.
+        self.cs_gate = nn.Parameter(torch.tensor(0.1))
 
         # ── Predictor head (per-stock, on enhanced latent) ──
         pred: list[nn.Module] = []
@@ -633,10 +642,10 @@ class SuperEncoder(nn.Module):
         mask: (B, N_stocks)  True = valid stock, False = padding
         Returns: (B, N_stocks) predictions
         """
-        B, N, F = x.shape
+        B, N, n_f = x.shape
 
         # 1. Per-stock encoding  (flatten → encode → reshape)
-        x_flat = x.reshape(B * N, F)                              # (B*N, F)
+        x_flat = x.reshape(B * N, n_f)                            # (B*N, n_f)
         z_flat = self._encode_flat(x_flat)                         # (B*N, latent)
         z = z_flat.reshape(B, N, self.latent_dim)                  # (B, N, latent)
 
@@ -645,8 +654,8 @@ class SuperEncoder(nn.Module):
         pad_mask = (~mask) if mask is not None else None
         h = self.cs_transformer(z_normed, src_key_padding_mask=pad_mask)  # (B, N, latent)
 
-        # Residual: enhanced = attention_output + original latent
-        enhanced = h + z
+        # Gated residual: model learns how much to trust CS signal
+        enhanced = torch.sigmoid(self.cs_gate) * h + z
 
         # 3. Per-stock prediction  (flatten → predict → reshape)
         enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
@@ -660,16 +669,16 @@ class SuperEncoder(nn.Module):
         mask: torch.Tensor,
         criterion: nn.Module,
     ) -> torch.Tensor:
-        """Combined prediction + reconstruction loss (masked).
+        """Combined prediction + reconstruction + IC consistency loss (masked).
 
         x:    (B, N_stocks, n_factors)
         y:    (B, N_stocks)
         mask: (B, N_stocks)  True = valid
         """
-        B, N, F = x.shape
+        B, N, n_f = x.shape
 
         # 1. Encode
-        x_flat = x.reshape(B * N, F)
+        x_flat = x.reshape(B * N, n_f)
         z_flat = self._encode_flat(x_flat)
         z = z_flat.reshape(B, N, self.latent_dim)
 
@@ -677,7 +686,7 @@ class SuperEncoder(nn.Module):
         z_normed = self.cs_norm(z)
         pad_mask = (~mask) if mask is not None else None
         h = self.cs_transformer(z_normed, src_key_padding_mask=pad_mask)
-        enhanced = h + z
+        enhanced = torch.sigmoid(self.cs_gate) * h + z
 
         # 3. Prediction loss (only valid stocks)
         enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
@@ -685,9 +694,34 @@ class SuperEncoder(nn.Module):
         pred_loss = criterion(pred[mask], y[mask])
 
         # 4. Reconstruction loss (from pre-attention latent, valid stocks only)
+        total_loss = pred_loss
         if self.recon_weight > 0:
-            x_recon = self._decode_flat(z_flat).reshape(B, N, F)
+            x_recon = self._decode_flat(z_flat).reshape(B, N, n_f)
             recon_loss = F.mse_loss(x_recon[mask], x[mask])
-            return pred_loss + self.recon_weight * recon_loss
+            total_loss = total_loss + self.recon_weight * recon_loss
 
-        return pred_loss
+        # 5. IC consistency loss — penalise variance of per-date Pearson IC
+        #    Uses differentiable Pearson correlation as a proxy for Spearman IC.
+        #    Loss = -mean(IC_per_date) + std(IC_per_date)
+        #    This directly optimises for higher, more stable IC → better ICIR.
+        if self.ic_loss_weight > 0:
+            date_ics = []
+            for b in range(B):
+                valid = mask[b]
+                n_valid = valid.sum()
+                if n_valid < 20:
+                    continue
+                p = pred[b][valid]
+                t = y[b][valid]
+                p_c = p - p.mean()
+                t_c = t - t.mean()
+                cov = (p_c * t_c).sum()
+                denom = torch.sqrt((p_c ** 2).sum() * (t_c ** 2).sum() + 1e-8)
+                date_ics.append(cov / denom)
+            if len(date_ics) >= 2:
+                ics = torch.stack(date_ics)
+                # Maximise mean IC, minimise IC variance
+                ic_loss = -ics.mean() + ics.std()
+                total_loss = total_loss + self.ic_loss_weight * ic_loss
+
+        return total_loss
