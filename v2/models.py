@@ -514,6 +514,24 @@ class TemporalTransformer(nn.Module):
 # 7. SuperEncoder  (autoencoder + cross-sectional attention on latent)
 # ═════════════════════════════════════════════════════════════════════════
 
+class _ResidualBlockLN(nn.Module):
+    """Residual block using LayerNorm (deterministic, no train/eval mismatch)."""
+
+    def __init__(self, dim: int, dropout: float = 0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x + self.net(x))
+
+
 class SuperEncoder(nn.Module):
     """Autoencoder with cross-sectional attention on the latent space.
 
@@ -535,6 +553,9 @@ class SuperEncoder(nn.Module):
     Reconstruction is computed from the *pre-attention* latent so the
     encoder must learn a good factor representation on its own.
 
+    Uses LayerNorm (not BatchNorm) for deterministic per-sample behaviour
+    across dates — critical for cross-date IC stability (ICIR).
+
     Input:  (B_dates, N_stocks, n_factors)  with bool padding mask
     Output: (B_dates, N_stocks)
     """
@@ -549,6 +570,8 @@ class SuperEncoder(nn.Module):
         recon_weight: float = 0.1,
         use_residual: bool = True,
         ic_loss_weight: float = 0.0,  # weight for IC consistency loss (0 = disabled)
+        output_tanh: bool = True,     # cap predictions with tanh for stability
+        cs_normalize: bool = True,    # cross-sectional z-score normalization on output
         # cross-sectional transformer params
         cs_n_heads: int = 4,
         cs_n_layers: int = 2,
@@ -566,15 +589,17 @@ class SuperEncoder(nn.Module):
         self.recon_weight = recon_weight
         self.ic_loss_weight = ic_loss_weight
         self.use_residual = use_residual
+        self.output_tanh = output_tanh
+        self.cs_normalize = cs_normalize
 
-        # ── Encoder (per-stock) ──
+        # ── Encoder (per-stock, LayerNorm for cross-date stability) ──
         enc: list[nn.Module] = []
         prev = input_size
         for h in encoder_sizes:
-            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU(), nn.Dropout(dropout)])
+            enc.extend([nn.Linear(prev, h), nn.LayerNorm(h), nn.GELU(), nn.Dropout(dropout)])
             if use_residual and prev == h:
                 # wrap the last 4 layers as a residual block
-                enc[-4:] = [_ResidualBlock(h, dropout)]
+                enc[-4:] = [_ResidualBlockLN(h, dropout)]
             prev = h
         enc.append(nn.Linear(prev, latent_dim))
         self.encoder = nn.Sequential(*enc)
@@ -660,7 +685,24 @@ class SuperEncoder(nn.Module):
         # 3. Per-stock prediction  (flatten → predict → reshape)
         enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
         pred = self.predictor(enhanced_flat).squeeze(-1)           # (B*N,)
-        return pred.reshape(B, N)                                  # (B, N)
+        pred = pred.reshape(B, N)                                  # (B, N)
+
+        # 4. Output tanh capping — prevents outlier predictions
+        if self.output_tanh:
+            pred = torch.tanh(pred)
+
+        # 5. Cross-sectional normalization — per-date z-score
+        #    Forces predictions to have zero-mean, unit-variance per date,
+        #    removing date-specific scale differences that destroy IC stability.
+        if self.cs_normalize and mask is not None:
+            for b in range(B):
+                valid = mask[b]
+                if valid.sum() < 2:
+                    continue
+                p = pred[b][valid]
+                pred[b][valid] = (p - p.mean()) / (p.std() + 1e-8)
+
+        return pred
 
     def compute_loss(
         self,
@@ -688,10 +730,23 @@ class SuperEncoder(nn.Module):
         h = self.cs_transformer(z_normed, src_key_padding_mask=pad_mask)
         enhanced = torch.sigmoid(self.cs_gate) * h + z
 
-        # 3. Prediction loss (only valid stocks)
+        # 3. Prediction (includes optional tanh + CS normalization)
         enhanced_flat = enhanced.reshape(B * N, self.latent_dim)
-        pred = self.predictor(enhanced_flat).squeeze(-1).reshape(B, N)
-        pred_loss = criterion(pred[mask], y[mask])
+        raw_pred = self.predictor(enhanced_flat).squeeze(-1).reshape(B, N)
+        if self.output_tanh:
+            raw_pred = torch.tanh(raw_pred)
+        # For loss, use raw (non-CS-normalized) predictions against
+        # CS-normalized targets to avoid information leakage in MSE
+        pred_loss = criterion(raw_pred[mask], y[mask])
+        # CS-normalize for IC loss (rank-aware)
+        pred = raw_pred.clone()
+        if self.cs_normalize:
+            for b in range(B):
+                valid = mask[b]
+                if valid.sum() < 2:
+                    continue
+                p = pred[b][valid]
+                pred[b][valid] = (p - p.mean()) / (p.std() + 1e-8)
 
         # 4. Reconstruction loss (from pre-attention latent, valid stocks only)
         total_loss = pred_loss
@@ -725,3 +780,68 @@ class SuperEncoder(nn.Module):
                 total_loss = total_loss + self.ic_loss_weight * ic_loss
 
         return total_loss
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# EMA (Exponential Moving Average) Model Wrapper
+# ═════════════════════════════════════════════════════════════════════════
+
+class EMAModel:
+    """Maintains an exponential moving average of model parameters.
+
+    The EMA model's predictions are smoother and more stable across dates
+    than the raw training model — the NN equivalent of tree ensembling.
+    Use the EMA model for inference / early-stopping evaluation.
+
+    Usage::
+
+        ema = EMAModel(model, decay=0.999)
+        # In training loop:
+        optimizer.step()
+        ema.update()
+        # For validation / OOS:
+        ema.apply()      # swap EMA weights into model
+        model.eval(); ...
+        ema.restore()    # restore training weights
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self):
+        """Call after each optimizer.step()."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+
+    def apply(self):
+        """Swap EMA weights into the model (for eval)."""
+        self.backup = {}
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self):
+        """Restore original training weights (after eval)."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup = {}
+
+    def state_dict(self):
+        """Return EMA shadow weights for saving."""
+        return {k: v.clone() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state_dict):
+        """Load EMA shadow weights."""
+        for k, v in state_dict.items():
+            if k in self.shadow:
+                self.shadow[k] = v.clone()

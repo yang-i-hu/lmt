@@ -43,7 +43,7 @@ from common import (
     run_lmt_api_evaluation, LMT_API_AVAILABLE,
     make_parser, BASE_DEFAULT_CONFIG,
 )
-from models import SuperEncoder
+from models import SuperEncoder, EMAModel
 import yaml
 
 
@@ -60,10 +60,13 @@ DEFAULT_CONFIG = {
         "recon_weight": 0.1,
         "use_residual": True,
         "ic_loss_weight": 1.0,
+        "output_tanh": True,
+        "cs_normalize": True,
         "cs_n_heads": 4,
         "cs_n_layers": 2,
         "cs_dim_feedforward": 256,
         "cs_dropout": None,
+        "ema_decay": 0.999,
     },
     "training": {
         "epochs": 100,
@@ -214,6 +217,10 @@ def train_model(
     warmup_epochs = tp.get("warmup_epochs", 10)
     es_metric = tp.get("early_stopping_metric", "icir")  # "icir" or "val_loss"
 
+    # EMA for smoother, more stable predictions (NN equivalent of ensembling)
+    ema_decay = config.get("model", {}).get("ema_decay", 0.999)
+    ema = EMAModel(model, decay=ema_decay) if ema_decay > 0 else None
+
     criterion = nn.MSELoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
@@ -250,11 +257,15 @@ def train_model(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if ema is not None:
+                ema.update()
             train_loss_sum += loss.item() * mask_b.sum().item()
             train_n += mask_b.sum().item()
         train_loss = train_loss_sum / max(train_n, 1)
 
-        # ── Validate (per-date IC tracking) ──
+        # ── Validate (per-date IC tracking, using EMA weights) ──
+        if ema is not None:
+            ema.apply()
         model.eval()
         val_loss_sum, val_n = 0.0, 0
         date_preds = {}   # date_idx → (preds, targets)
@@ -278,6 +289,10 @@ def train_model(
                     d_key = len(date_preds)
                     date_preds[d_key] = (p, t)
         val_loss = val_loss_sum / max(val_n, 1)
+
+        # Restore training weights after EMA-based validation
+        if ema is not None:
+            ema.restore()
 
         # Compute per-date Spearman ICs → ICIR
         date_ics = []
@@ -319,6 +334,11 @@ def train_model(
 
     if not early_stopping.early_stop:
         early_stopping.load_best_model(model)
+
+    # Apply EMA weights for inference — smoother, more stable predictions
+    if ema is not None:
+        ema.apply()
+        logger.info(f"    ⤷ Applied EMA weights (decay={ema.decay})")
 
     if es_metric == "icir":
         best_epoch = int(np.argmax(history["val_icir"])) + 1
@@ -449,6 +469,8 @@ def process_snapshot(
             recon_weight=mc.get("recon_weight", 0.1),
             use_residual=mc.get("use_residual", True),
             ic_loss_weight=mc.get("ic_loss_weight", 0.0),
+            output_tanh=mc.get("output_tanh", True),
+            cs_normalize=mc.get("cs_normalize", True),
             cs_n_heads=mc.get("cs_n_heads", 4),
             cs_n_layers=mc.get("cs_n_layers", 2),
             cs_dim_feedforward=mc.get("cs_dim_feedforward", 256),

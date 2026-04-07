@@ -36,6 +36,9 @@ model:
   recon_weight: 0.1             # Reconstruction loss weight (0 = disable)
   use_residual: true            # Residual connections in encoder (where dims match)
   ic_loss_weight: 1.0           # IC consistency loss: -mean(IC) + std(IC), directly optimises ICIR
+  output_tanh: true             # Cap predictions with tanh — prevents outliers from distorting IC
+  cs_normalize: true            # Per-date z-score normalization — removes cross-date scale drift
+  ema_decay: 0.999              # EMA of model weights for smoother inference (0 = disable)
 
   # ── Cross-Sectional Transformer (on latent space) ──
   cs_n_heads: 8                 # Attention heads (latent_dim must be divisible)
