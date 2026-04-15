@@ -720,14 +720,14 @@ class SuperEncoder(nn.Module):
         self.output_tanh = output_tanh
         self.cs_normalize = cs_normalize
 
-        # ── Encoder (per-stock, LayerNorm for cross-date stability) ──
+        # ── Encoder (per-stock) ──
         enc: list[nn.Module] = []
         prev = input_size
         for h in encoder_sizes:
-            enc.extend([nn.Linear(prev, h), nn.LayerNorm(h), nn.GELU(), nn.Dropout(dropout)])
+            enc.extend([nn.Linear(prev, h), nn.BatchNorm1d(h), nn.GELU(), nn.Dropout(dropout)])
             if use_residual and prev == h:
                 # wrap the last 4 layers as a residual block
-                enc[-4:] = [_ResidualBlockLN(h, dropout)]
+                enc[-4:] = [_ResidualBlock(h, dropout)]
             prev = h
         enc.append(nn.Linear(prev, latent_dim))
         self.encoder = nn.Sequential(*enc)
